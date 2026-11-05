@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CampusSlot · 环境自检</title>
+<style>
+  :root{
+    --bg:#f5f5f7; --card:#ffffff; --text:#1d1d1f; --text2:#6e6e73;
+    --line:rgba(0,0,0,.08); --ok:#1d9e75; --warn:#ba7517; --bad:#e24b4a;
+    --brand:#378add; --radius:16px;
+  }
+  *{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+  body{
+    margin:0;padding:40px 20px 64px;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  .wrap{max-width:880px;margin:0 auto}
+  header{margin-bottom:28px}
+  h1{font-size:28px;font-weight:650;letter-spacing:-.02em;margin:0 0 6px}
+  .sub{color:var(--text2);font-size:14px;line-height:1.6}
+  .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:18px}
+  button{
+    appearance:none;border:none;border-radius:10px;padding:9px 16px;font-size:13px;font-weight:550;
+    background:var(--brand);color:#fff;cursor:pointer;transition:.18s;
+  }
+  button:hover{filter:brightness(.94)}
+  button.ghost{background:rgba(255,255,255,.9);color:var(--text);border:1px solid var(--line)}
+  button:active{transform:scale(.97)}
+  .stamp{margin-left:auto;font-size:12px;color:var(--text2);font-variant-numeric:tabular-nums}
+  .grid{display:grid;gap:14px}
+  .card{
+    background:var(--card);border-radius:var(--radius);padding:18px 20px;
+    box-shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.04);
+    border:1px solid rgba(255,255,255,.7);
+  }
+  .card-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:#c7c7cc;box-shadow:0 0 0 4px rgba(0,0,0,.03)}
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.warn{background:var(--warn)}
+  .name{font-size:15px;font-weight:600}
+  .tag{margin-left:auto;font-size:11.5px;padding:3px 9px;border-radius:999px;background:#f0f0f2;color:var(--text2)}
+  .tag.ok{background:rgba(29,158,117,.1);color:var(--ok)}
+  .tag.bad{background:rgba(226,75,74,.1);color:var(--bad)}
+  .tag.warn{background:rgba(186,117,23,.1);color:var(--warn)}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:7px 16px;margin:0;font-size:13px}
+  dt{color:var(--text2);white-space:nowrap}
+  dd{margin:0;word-break:break-all;font-variant-numeric:tabular-nums}
+  .err{color:var(--bad);font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.5}
+  .hint{
+    margin-top:20px;padding:14px 18px;border-radius:12px;background:rgba(55,138,221,.07);
+    color:#2b5f9e;font-size:12.5px;line-height:1.7;border:1px solid rgba(55,138,221,.14)
+  }
+  .hint code{background:rgba(55,138,221,.1);padding:1px 5px;border-radius:4px;font-size:12px}
+  .toast{
+    position:fixed;left:50%;bottom:28px;transform:translate(-50%,20px);opacity:0;
+    background:rgba(29,29,31,.92);color:#fff;padding:11px 20px;border-radius:11px;font-size:13px;
+    transition:.25s;pointer-events:none;max-width:80vw
+  }
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+  .sk{color:var(--text2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>环境自检</h1>
+    <div class="sub">CampusSlot · 校园限量资源预约发放中台（v2.0）<br>
+      这一页只回答一个问题：三个中间件现在到底通不通，关键配置有没有踩坑。</div>
+    <div class="bar">
+      <button onclick="load()">重新检测</button>
+      <button class="ghost" onclick="ping('/api/dev/mq/send')">发一条消息</button>
+      <button class="ghost" onclick="ping('/api/dev/mq/send-delay?delaySeconds=37')">发一条 37 秒定时消息</button>
+      <span class="stamp" id="stamp">检测中…</span>
+    </div>
+  </header>
+
+  <div class="grid" id="grid">
+    <div class="card"><div class="card-head"><span class="dot"></span><span class="name">MySQL</span></div>
+      <div class="sk">检测中…</div></div>
+    <div class="card"><div class="card-head"><span class="dot"></span><span class="name">Redis</span></div>
+      <div class="sk">检测中…</div></div>
+    <div class="card"><div class="card-head"><span class="dot"></span><span class="name">RocketMQ</span></div>
+      <div class="sk">检测中…</div></div>
+  </div>
+
+  <div class="hint">
+    <b>三个必须显式确认的配置</b><br>
+    ① Redis 的 <code>maxmemory-policy</code> 必须是 <code>noeviction</code>——库存 key 被淘汰后 Lua 读到 nil，
+    表现为「所有申领全部失败但不报错」。<br>
+    ② 所有容器的 <code>TZ</code> 必须显式设为 <code>Asia/Shanghai</code>——报表和对账时间窗口偏 8 小时，
+    表现为「对账永远对不平」。<br>
+    ③ <code>campusslot.mq.enabled=false</code> 时消息不会真的进 Broker，压测数据一律无效。
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const toastEl = document.getElementById('toast');
+function toast(msg){
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastEl._t);
+  toastEl._t = setTimeout(()=>toastEl.classList.remove('show'), 3200);
+}
+
+function esc(v){
+  return String(v ?? '-').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function card(title, state, tagText, rows, error){
+  const tagClass = state === 'ok' ? 'ok' : state === 'warn' ? 'warn' : 'bad';
+  const dl = rows.length
+    ? `<dl>${rows.map(([k,v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` : '';
+  const err = error ? `<div class="err" style="margin-top:10px">${esc(error)}</div>` : '';
+  return `<div class="card">
+    <div class="card-head"><span class="dot ${tagClass}"></span>
+      <span class="name">${esc(title)}</span>
+      <span class="tag ${tagClass}">${esc(tagText)}</span></div>
+    ${dl}${err}</div>`;
+}
+
+async function load(){
+  const stamp = document.getElementById('stamp');
+  stamp.textContent = '检测中…';
+  try{
+    const res = await fetch('/api/health/env');
+    const json = await res.json();
+    if(!json || json.code !== 0) throw new Error(json && json.message ? json.message : '接口返回异常');
+    const d = json.data || {};
+
+    document.getElementById('grid').innerHTML = [
+      card('MySQL', d.mysql && d.mysql.ok ? 'ok' : 'bad',
+        d.mysql && d.mysql.ok ? '已连接' : '不可用',
+        Object.entries(d.mysql || {}).filter(([k]) => k !== 'ok' && k !== 'error' && k !== 'product'),
+        (d.mysql && d.mysql.error) || ''
+      ),
+      card('Redis', (d.redis && d.redis.ok && d.redis.maxmemoryPolicy === 'noeviction') ? 'ok'
+          : (d.redis && d.redis.ok ? 'warn' : 'bad'),
+        !(d.redis && d.redis.ok) ? '不可用'
+          : (d.redis.maxmemoryPolicy === 'noeviction' ? '已连接' : '策略需确认'),
+        Object.entries(d.redis || {}).filter(([k]) => k !== 'ok' && k !== 'error'),
+        (d.redis && d.redis.error) || ''
+      ),
+      card('RocketMQ', d.rocketmq && d.rocketmq.enabled ? 'warn' : 'warn',
+        d.rocketmq && d.rocketmq.enabled ? '已启用' : '未启用',
+        Object.entries(d.rocketmq || {}).filter(([k]) => k !== 'note'),
+        ''
+      )
+    ].join('');
+
+    stamp.textContent = `${d.time || ''} · ${d.timezone || ''} · JDK ${d.javaVersion || ''}`;
+  }catch(e){
+    document.getElementById('grid').innerHTML = card('接口', 'bad', '请求失败', [], e.message);
+    stamp.textContent = '检测失败';
+  }
+}
+
+async function ping(url){
+  try{
+    const res = await fetch(url, {method:'POST'});
+    const json = await res.json();
+    if(json && json.code === 0){
+      const w = json.data && json.data.warning;
+      toast(w ? w : `已发送 · ${json.data.messageId}`);
+    } else {
+      toast((json && json.message) || '发送失败');
+    }
+  }catch(e){ toast('发送失败：' + e.message); }
+}
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

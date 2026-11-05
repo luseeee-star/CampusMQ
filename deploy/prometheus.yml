@@ -1,0 +1,34 @@
+# Prometheus 抓取配置（执行方案 §5.1）
+# 应用跑在宿主机上（IDEA 里直接启动），所以用 host.docker.internal 反向访问。
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: slot-app
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8080']
+        labels:
+          app: slot-app
+
+  - job_name: slot-consumer
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8082']
+        labels:
+          app: slot-consumer
+
+  # RocketMQ 自身指标：5.x 需要开启 broker 的 metrics exporter 才有，
+  # 若 /metrics 不通，本 job 会显示 DOWN，属预期，不影响应用侧指标。
+  - job_name: rocketmq-broker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['broker:5557']
+        labels:
+          app: rocketmq
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

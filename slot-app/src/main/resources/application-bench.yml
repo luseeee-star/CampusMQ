@@ -1,0 +1,24 @@
+# 压测专用 profile：启动时加 --spring.profiles.active=bench
+#
+# 【为什么必须单独一个 profile】
+# 默认配置里 mybatis-plus.configuration.log-impl 是 StdOutImpl，
+# 每执行一条 SQL 就往控制台打三行（Preparing / Parameters / Total）。
+# 压测时这等于给每个请求挂上一次同步 I/O，P99 会被抬到不可信的高度，
+# 吞吐也会被压下去 —— 而控制台看起来一切正常，只是"有点慢"。
+#
+# 2026-10-27 实测：D2 首轮开着 StdOutImpl 跑出 295 req/s、P99 1790ms。
+# 同一个接口关掉日志后才是可比数字。**开着日志测出来的值不能写进报告，也不能用来做对照**，
+# 因为它测的是控制台，不是链路。
+#
+# 【为什么 root 仍然保留 INFO】
+# 只关业务日志，不关 ERROR：P0 告警（库存 key 缺失、Redis 与 DB 漂移）必须还能看见。
+# 把它们一起关掉，压测就变成"跑得很快但什么都没发现"。
+
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl
+
+logging:
+  level:
+    root: INFO
+    com.campusslot: WARN

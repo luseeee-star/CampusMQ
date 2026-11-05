@@ -1,0 +1,162 @@
+server:
+  port: 8080
+  shutdown: graceful
+  tomcat:
+    threads:
+      # 8000 QPS 的入口需要足够的请求线程；真实瓶颈不在 Tomcat 线程数，但先给足避免成为假瓶颈
+      max: 400
+      accept-count: 1000
+
+spring:
+  application:
+    name: campusslot
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: Asia/Shanghai
+  datasource:
+    url: jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3307}/${DB_NAME:campusslot}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${DB_USER:root}
+    password: ${DB_PASS:campusslot}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # 连接池是 8000 QPS 直连数据库时最先崩的东西（2 秒耗尽），
+      # 但真正让它不崩的是 Redis 预扣，不是把池子调大
+      maximum-pool-size: 64
+      minimum-idle: 16
+      connection-timeout: 3000
+      max-lifetime: 1800000
+  task:
+    scheduling:
+      pool:
+        # 默认 1 个线程：SYS-1 的扫表一旦卡在追平上，SYS-2 的通知重试就全部延后，
+        # 表现为"通知忽然晚了几十秒"，而根因是另一个任务抢了线程。
+        # 2 个线程让「释放扫描」和「通知重试」各占一条，互不排队。
+        # 不要开到 8：每个任务都是固定频率的 DB/Redis 负载，线程数不会让它更快，只会让并发更高。
+        size: 2
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      database: 0
+      timeout: 1000ms
+      lettuce:
+        pool:
+          max-active: 64
+          max-idle: 32
+          min-idle: 8
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    # 压测前必须改成 NoLoggingImpl，控制台日志会掩盖真实瓶颈
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics,env
+  endpoint:
+    health:
+      show-details: always
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+campusslot:
+  # D1 验证用端点（/api/dev/mq/**）。试点上线前必须改成 false。
+  dev-endpoints: ${DEV_ENDPOINTS:true}
+  # D6：入口限流。
+  # 默认关闭 —— D5 的全部基线都是在无限流下测的，默认打开会让"复现拐点曲线"
+  # 变成一跑就撞 429，看起来像系统退化，实际是闸门在起作用。
+  gateway:
+    rate-limit:
+      enabled: ${RATE_LIMIT_ENABLED:false}
+      # 3000 不是拍的：D5 开环实测 3000 档 P99=145ms、处理能力仍占输入的 98%；
+      # 4000 档掉到 76% 并越过 200ms。闸门就该设在最后一个还舒服的档位上，
+      # 让系统在被压垮之前主动拒绝，而不是被压垮后全员超时。
+      qps: ${RATE_LIMIT_QPS:3000}
+      # 桶容量 = 1 秒的量。再大等于没限流，再小会让开场第一批请求被无谓拒掉。
+      burst: ${RATE_LIMIT_BURST:3000}
+      include-paths:
+        - /api/claim
+        - /api/claim/mq
+      # dev 端点必须排除：drain / reset 被限流会得到"没追平""压测器没起来"
+      # 这种完全误导的结论，而这正是 D5 花最多时间才排掉的那类问题。
+      exclude-paths:
+        - /api/claim/dev/**
+  mq:
+    # D0/D1 无中间件时保持 false，应用仍能启动；
+    # 进入 D3 主链路联调前必须改 true，否则消息不会真的进 Broker
+    enabled: ${MQ_ENABLED:false}
+    endpoints: ${MQ_ENDPOINTS:127.0.0.1:8081}
+    send-timeout-ms: 3000
+  claim:
+    # 确认时限（R-5）。默认 30 分钟，但演示「超时释放」时不要改代码：
+    # 启动时加 --campusslot.claim.confirm-timeout-sec=60，一分钟就能看到完整状态流转
+    confirm-timeout-sec: ${CONFIRM_TIMEOUT_SEC:1800}
+    # 幂等键 TTL 的冗余。D4 起实际 TTL 取 max(确认时限+本值, 活动结束+1天)，
+    # 因为异步链路下"活动期间任何重复点击都该返回首次结果"（R-3），
+    # 40 分钟的 TTL 会在活动第 2 天就失效，把重复点击变成一次全新申领。见 AsyncClaimService。
+    idem-ttl-extra-sec: ${IDEM_TTL_EXTRA_SEC:600}
+    # D3：资源元信息缓存。链路上最后一次 DB 往返靠它搬走。
+    # 不要为了"更省"调到分钟级：运营把活动下架后，学生最长还能抢这么久。
+    meta-cache-ttl-ms: ${META_CACHE_TTL_MS:5000}
+    # G-1 学院配额的总开关。D12 决策点：关掉后 quota_college 的行只用于报表，不拦截。
+    # 还需要该活动真的配了学院行才会生效（见 ResourceMetaCache#loadFromDb）。
+    college-quota-enabled: ${COLLEGE_QUOTA_ENABLED:false}
+  reconcile:
+    # SYS-3：每 5 分钟比对 Redis 与 DB。调小会让对账任务自己变成压测负载，别为了「更安全」调到 10 秒
+    interval-ms: ${RECONCILE_INTERVAL_MS:300000}
+    # 巡检单批上限，避免一次把整表拉进内存
+    batch-size: ${RECONCILE_BATCH_SIZE:200}
+  release:
+    # SYS-1 超时释放的兜底扫表。演示「超时释放」时把 confirm-timeout-sec 调小即可，
+    # 不要为了看得快把这个周期调到 100ms —— 那是在给每个 500ms 加一次全表索引扫描。
+    sweep-enabled: ${RELEASE_SWEEP_ENABLED:true}
+    sweep-interval-ms: ${RELEASE_SWEEP_INTERVAL_MS:500}
+  notify:
+    # 重试窗口：7 次尝试 / 1s 起，累计 63s，第 7 次失败同轮置 DEAD。
+    #
+    # **max-retry 是"最大尝试次数（含首次）"，不是"重试次数"**——这个名字有歧义，但 yml key
+    # 一旦改就要同步环境变量，先按注释写死语义。delay 只在前 6 次失败后产生：
+    #   attempt 1 失败 → +1s    attempt 4 失败 → +8s
+    #   attempt 2 失败 → +2s    attempt 5 失败 → +16s
+    #   attempt 3 失败 → +4s    attempt 6 失败 → +32s
+    #   attempt 7 失败 → attempt >= maxRetry → DEAD，不再排下一次
+    # 累计 1+2+4+8+16+32 = 63s。（2026-11-04 修正：上一版写 max-retry=6 却标 63s，
+    # 实际 6 次时最后一个 delay 是 16s，累计只有 31s——32s 那一步永远不会发生。）
+    #
+    # 选 63s 而不是 31s：15s 对真实通道太短，31s 也没好多少；短信/微信网关抖动一次常超过半分钟。
+    # 验收别真等 63s：用相对偏移把下一次提前，别用 NOW()——
+    #   UPDATE notification SET next_retry_at = DATE_SUB(next_retry_at, INTERVAL 1 HOUR) WHERE id = ?;
+    # 这样只依赖行内已有的值，不碰 DB 时钟（阶段 1.5 已经把所有 NOW() 赶出去了）。
+    max-retry: ${NOTIFY_MAX_RETRY:7}
+    retry-backoff-ms: ${NOTIFY_RETRY_BACKOFF_MS:1000}
+    # 重试器的扫描周期与单轮硬预算。预算必须**逐条判**（D8 §4a 的教训）：
+    # 批前判的话，剩余预算 1ms 时仍会放整批 50 条进去，一轮变成 50 × 单条耗时，
+    # 把同池每 500ms 一次的释放扫描挤出去——而 NFR-5 恰恰看那个任务的延迟。
+    retry-interval-ms: ${NOTIFY_RETRY_INTERVAL_MS:1000}
+    retry-batch: ${NOTIFY_RETRY_BATCH:50}
+    retry-budget-ms: ${NOTIFY_RETRY_BUDGET_MS:600}
+    retry-enabled: ${NOTIFY_RETRY_ENABLED:true}
+    # 验收注入：前 N 次尝试一律失败（0=正常，>=max-retry=全部进 DEAD）。
+    # 用"次数"而不是"概率"：概率注入会让验收一半概率红。可运行时改：
+    # POST /api/claim/dev/notify-mock?failAttempts=n
+    mock-fail-attempts: ${NOTIFY_MOCK_FAIL_ATTEMPTS:0}
+
+logging:
+  pattern:
+    # traceId / studentId 必须出现在每行日志里，否则 D11 故障注入只能靠时间戳猜
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{traceId:-}] [%X{studentId:-}] %logger{36} - %msg%n"
+  level:
+    root: INFO
+    com.campusslot: ${LOG_LEVEL:DEBUG}

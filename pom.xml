@@ -1,107 +1,123 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>com.campusmq</groupId>
-  <artifactId>campusmq-parent</artifactId>
-  <version>1.0-SNAPSHOT</version>
+  <groupId>com.campusslot</groupId>
+  <artifactId>campusslot-parent</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
   <packaging>pom</packaging>
-  <name>CampusMQ Parent</name>
-  <description>Self-built single-node message broker for teaching verification. NOT production-grade.</description>
+  <name>CampusSlot Parent</name>
+  <description>校园限量资源预约发放中台（需求规格说明书 v2.0 / 两周落地执行方案 v2.0）</description>
 
+  <!--
+    单人项目的模块划分，只保留「必须分开」的边界：
+
+      slot-common     两个进程共用的内核（实体 / Mapper / Lua / MQ / 错误码）
+      slot-app        API 侧全部业务，包内分层 gateway / resource / claim / reconcile
+      slot-consumer   消费者进程
+
+    为什么是 3 个而不是 8 个：模块边界的价值是「编译器拦住跨域调用」，
+    一个人写代码时这个价值撑不起十几次跨模块跳转的成本。
+    但 consumer 必须独立成模块 —— 它要单独打包成可 kill 的进程，
+    用于 D6「停掉通知消费者」与 D11 故障注入，这个能力不能丢。
+    common 必须独立 —— 两个进程都要用同一套实体和 Lua 脚本。
+
+    功能边界改为由包体现（com.campusslot.app.claim 等），
+    需要拆回微服务时，把对应包整体挪进新模块即可，类不用改。
+
+    注意：需求书 §9 明确「不做抽签 / 摇号」，因此没有 lottery 相关包。
+  -->
   <modules>
-    <module>campusmq-common</module>
-    <module>campusmq-client</module>
-    <module>campusmq-broker</module>
-    <module>campusmq-demo</module>
-    <module>benchmark</module>
+    <module>slot-common</module>
+    <module>slot-app</module>
+    <module>slot-consumer</module>
   </modules>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.source>21</maven.compiler.source>
-    <maven.compiler.target>21</maven.compiler.target>
-    <netty.version>4.1.118.Final</netty.version>
-    <jackson.version>2.17.3</jackson.version>
-    <slf4j.version>2.0.17</slf4j.version>
-    <logback.version>1.5.16</logback.version>
-    <junit.version>5.11.3</junit.version>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+
+    <!-- 版本基线：执行方案 §1.5 -->
+    <spring-boot.version>3.3.5</spring-boot.version>
+    <mybatis-plus.version>3.5.9</mybatis-plus.version>
+    <!-- 5.x gRPC 新客户端：任意时间定时消息必须走它，4.x 客户端只有 18 个固定档位 -->
+    <rocketmq-client-java.version>5.2.2</rocketmq-client-java.version>
+    <lombok.version>1.18.34</lombok.version>
   </properties>
 
   <dependencyManagement>
     <dependencies>
       <dependency>
-        <groupId>io.netty</groupId>
-        <artifactId>netty-common</artifactId>
-        <version>${netty.version}</version>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
       </dependency>
+
+      <!-- 内部模块 -->
       <dependency>
-        <groupId>io.netty</groupId>
-        <artifactId>netty-buffer</artifactId>
-        <version>${netty.version}</version>
+        <groupId>com.campusslot</groupId>
+        <artifactId>slot-common</artifactId>
+        <version>${project.version}</version>
       </dependency>
+
+      <!-- 持久层 -->
       <dependency>
-        <groupId>io.netty</groupId>
-        <artifactId>netty-transport</artifactId>
-        <version>${netty.version}</version>
+        <groupId>com.baomidou</groupId>
+        <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        <version>${mybatis-plus.version}</version>
       </dependency>
+
+      <!-- 消息中间件：RocketMQ 5.x gRPC 客户端 -->
       <dependency>
-        <groupId>io.netty</groupId>
-        <artifactId>netty-codec</artifactId>
-        <version>${netty.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>io.netty</groupId>
-        <artifactId>netty-handler</artifactId>
-        <version>${netty.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.fasterxml.jackson.core</groupId>
-        <artifactId>jackson-databind</artifactId>
-        <version>${jackson.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.slf4j</groupId>
-        <artifactId>slf4j-api</artifactId>
-        <version>${slf4j.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>ch.qos.logback</groupId>
-        <artifactId>logback-classic</artifactId>
-        <version>${logback.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.junit.jupiter</groupId>
-        <artifactId>junit-jupiter</artifactId>
-        <version>${junit.version}</version>
+        <groupId>org.apache.rocketmq</groupId>
+        <artifactId>rocketmq-client-java</artifactId>
+        <version>${rocketmq-client-java.version}</version>
       </dependency>
     </dependencies>
   </dependencyManagement>
 
+  <dependencies>
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <version>${lombok.version}</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+
   <build>
     <pluginManagement>
       <plugins>
+        <!-- Maven 3.6.1 无法使用 3.13.0+ 编译器插件，锁定 3.11.0（见 LOGBOOK v1.0 记录） -->
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-compiler-plugin</artifactId>
           <version>3.11.0</version>
           <configuration>
-            <source>21</source>
-            <target>21</target>
+            <release>${maven.compiler.release}</release>
             <encoding>UTF-8</encoding>
+            <parameters>true</parameters>
           </configuration>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
           <version>3.2.5</version>
-          <configuration>
-            <argLine>--add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED</argLine>
-          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.springframework.boot</groupId>
+          <artifactId>spring-boot-maven-plugin</artifactId>
+          <version>${spring-boot.version}</version>
         </plugin>
       </plugins>
     </pluginManagement>
+
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>

@@ -37,3 +37,12 @@ build/
 
 ### Mac OS ###
 .DS_Store
+### CampusSlot（v2.0）###
+deploy/data/
+deploy/.env
+logs/
+*.log
+# 误建的 curl 重定向文件（内容是一次 /dev/reset 的响应体，不是源码）
+/in
+# 本地会话笔记，不属于项目源码；要入库时显式 git add -f
+.workbuddy/

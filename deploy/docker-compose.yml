@@ -1,0 +1,197 @@
+# ============================================================
+# CampusSlot 一键起环境（执行方案 §4.1）
+#
+#   起：  docker compose up -d
+#   基線：./reset.sh        ← 每组实验前必须回到基线，否则「固定条件」只是嘴上说说
+#     （macOS/Linux 用 bash deploy/reset.sh；Windows 用 bash deploy/reset.sh，Git Bash 即可）
+#
+# 端口刻意错开常用端口，避免和本机已装的 MySQL 打架：
+#   MySQL 3307 / Redis 6379 / Proxy 8081 / Dashboard 8180 / Prometheus 9090 / Grafana 3000
+#
+# 本文件是「单机开发基线」，内存上限按 8–16G 笔记本给。
+# 服务器（16C/32G）按执行方案 §4.2 的表格逐容器调大，别直接照搬。
+# ============================================================
+
+name: campusslot
+
+x-tz: &tz Asia/Shanghai
+
+services:
+  mysql:
+    image: mysql:8.0.36
+    container_name: cs-mysql
+    restart: unless-stopped
+    command:
+      - --max-connections=2000
+      - --innodb-buffer-pool-size=1G
+      - --default-time-zone=+08:00
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      TZ: *tz
+      MYSQL_ROOT_PASSWORD: ${DB_PASS:-campusslot}
+      MYSQL_DATABASE: campusslot
+    ports:
+      - "${DB_PORT:-3307}:3306"
+    volumes:
+      # 首次初始化（数据卷为空）时按文件名顺序自动执行 schema.sql → seed.sql
+      - ./sql:/docker-entrypoint-initdb.d:ro
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7.2
+    container_name: cs-redis
+    restart: unless-stopped
+    # maxmemory-policy 必须显式 noeviction：
+    # 库存 key 被淘汰后 Lua 读到 nil，表现为「所有申领全部失败但不报错」，
+    # 排查时会去怀疑 MQ、怀疑 DB，最后才发现是缓存策略（执行方案 §4.1 警告）
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-1gb}
+      - --maxmemory-policy
+      - noeviction
+    environment:
+      TZ: *tz
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  namesrv1:
+    image: apache/rocketmq:5.3.0
+    container_name: cs-namesrv1
+    restart: unless-stopped
+    command: sh mqnamesrv
+    environment:
+      TZ: *tz
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn256m"
+    ports:
+      - "9876:9876"
+    volumes:
+      - ./data/rmqlogs:/home/rocketmq/logs
+
+  namesrv2:
+    # 两个 NameServer 即可消除单点，成本几乎为零
+    image: apache/rocketmq:5.3.0
+    container_name: cs-namesrv2
+    restart: unless-stopped
+    command: sh mqnamesrv
+    environment:
+      TZ: *tz
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn256m"
+    volumes:
+      - ./data/rmqlogs2:/home/rocketmq/logs
+
+  broker:
+    image: apache/rocketmq:5.3.0
+    container_name: cs-broker
+    restart: unless-stopped
+    depends_on:
+      - namesrv1
+      - namesrv2
+    command: sh mqbroker -c /home/rocketmq/conf/broker.conf
+    environment:
+      TZ: *tz
+      NAMESRV_ADDR: "namesrv1:9876;namesrv2:9876"
+      # 页缓存靠宿主内存，别把堆设死在 2G（执行方案 §4.2）
+      JAVA_OPT_EXT: "-Xms1g -Xmx1g -Xmn512m"
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+    volumes:
+      - ./broker.conf:/home/rocketmq/conf/broker.conf:ro
+      # Store 必须挂宿主机目录，不用命名卷：overlayfs 会拖累顺序写，
+      # 压出来的 TPS 没有参考价值（执行方案 §4.2 第 2 条）。
+      #
+      # 路径做成可配（默认仍是 ./data/store），因为 2026-10-27 实测发现
+      # 本机 D 盘常驻 90%+，而 Broker 有三道磁盘闸门（75 / 85 / 90），
+      # 会把所有写入拒成 SERVICE_NOT_AVAILABLE。正确处置是把 store 挪到空盘，
+      # 不是把阈值往上推 —— 阈值是用来告警的，不是用来消音的。
+      # 本机 .env 里写 RMQ_STORE_DIR=C:/campusslot-rmq-store。
+      - ${RMQ_STORE_DIR:-./data/store}:/home/rocketmq/store
+      - ./data/rmqlogs-broker:/home/rocketmq/logs
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  proxy:
+    # 5.x 的 gRPC 接入层。客户端（rocketmq-client-java）连的是它，不是 9876。
+    image: apache/rocketmq:5.3.0
+    container_name: cs-proxy
+    restart: unless-stopped
+    depends_on:
+      - broker
+    command: sh mqproxy
+    environment:
+      TZ: *tz
+      NAMESRV_ADDR: "namesrv1:9876;namesrv2:9876"
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn256m"
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./data/rmqlogs-proxy:/home/rocketmq/logs
+
+  dashboard:
+    image: apacherocketmq/rocketmq-dashboard:latest
+    container_name: cs-dashboard
+    restart: unless-stopped
+    depends_on:
+      - namesrv1
+    environment:
+      TZ: *tz
+      JAVA_OPTS: "-Drocketmq.namesrv.addr=namesrv1:9876;namesrv2:9876 -Dcom.rocketmq.sendMessageWithVIPChannel=false"
+    ports:
+      - "8180:8080"
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: cs-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    extra_hosts:
+      # 让容器内能访问宿主机上的 slot-app / slot-consumer
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: cs-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      TZ: *tz
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASS:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  mysql-data:
+  redis-data:
+  prom-data:
+  grafana-data:

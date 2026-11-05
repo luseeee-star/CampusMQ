@@ -1,0 +1,76 @@
+server:
+  # 仅暴露 actuator / Prometheus，不承载业务接口
+  port: 8082
+  shutdown: graceful
+
+spring:
+  application:
+    name: campusslot-consumer
+  jackson:
+    time-zone: Asia/Shanghai
+  datasource:
+    url: jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3307}/${DB_NAME:campusslot}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${DB_USER:root}
+    password: ${DB_PASS:campusslot}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # 批量落库靠的是 BATCH_SIZE 与 rewriteBatchedStatements，不是无限加连接
+      maximum-pool-size: 32
+      minimum-idle: 8
+      connection-timeout: 3000
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      timeout: 1000ms
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+campusslot:
+  mq:
+    # 消费者必须开着才有意义；D0/D1 无中间件时可置 false 让进程先起
+    enabled: ${MQ_ENABLED:false}
+    endpoints: ${MQ_ENDPOINTS:127.0.0.1:8081}
+  consumer:
+    # cg_record 的消费线程数。两条天花板：Topic 队列数(16) 与 DB 连接池(32)。
+    # 超过 16 之后再加线程只是让 16 个队列在本地抢连接，D10 会把拐点量出来。
+    threads: ${CONSUME_THREADS:20}
+  notify:
+    # 与 API 侧保持一致：7 次尝试 / 1s 起（1/2/4/8/16/32，累计 63s），第 7 次失败 DEAD。
+    # max-retry 是"最大尝试次数（含首次）"，不是"重试次数"，理由见 slot-app 的同段注释。
+    # 两处必须同值——消费者只负责写 PENDING，重试由 API 侧的 NotificationRetryJob 驱动，
+    # 但下次有人把重试搬到消费端时，配置不该在两处之间分叉。
+    max-retry: ${NOTIFY_MAX_RETRY:7}
+    retry-backoff-ms: ${NOTIFY_RETRY_BACKOFF_MS:1000}
+    # 锁定通知的时效上限。新建消费组会把 Topic 保留的历史消息整段重放，
+    # 而 gRPC 消费端走 POP 模式，`mqadmin resetOffsetByTime` 写的是经典位点表、实测不生效，
+    # 所以必须由消息自带的 bornTimestamp 兜底。超过这个年龄的锁定通知一律跳过（ACK 不是重试）：
+    # 确认窗口只有 30 分钟，晚到十分钟的通知仍有意义，晚到三天的只会让人以为系统坏了。
+    max-age-ms: ${NOTIFY_MAX_AGE_MS:600000}
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{traceId:-}] %logger{36} - %msg%n"
+  level:
+    root: INFO
+    # 压测时必须 INFO：每条消息 6 行 SQL 的 DEBUG 日志实测把消费速度压到 500 条/秒，
+    # 78k 条积压要 drain 两分半，比压测本身还久。experiment.ps1 会设 LOG_LEVEL=INFO。
+    com.campusslot: ${LOG_LEVEL:DEBUG}
