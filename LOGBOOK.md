@@ -3484,6 +3484,59 @@ HTTP 响应体里加不加那三个字节，curl 和浏览器显示完全一样�
 
 ---
 
+## D9 · A3：巡检上线，以及三条"判据本身会骗人"的坑（2026-11-05 傍晚）
+
+`ReconcileService` + `ReconcileJob` + `POST /api/admin/reconcile/run?resourceId=`。
+八条判据一次跑完，全部与预期逐项对上；下面只记实测值和三个差点写错的判据。
+
+样本：r14（5 名额、无名单），抢 3 人后 `/drain` → `pending=0`、三数 **5 / 2 / 2**、`drift 0`。
+为了让"连续两个周期"在手工操作下可复现，启动带 `--campusslot.reconcile.interval-ms=10000`（判定窗口 5s～20s）。
+
+| 判据 | 实测 | 结果 |
+|---|---|---|
+| 草稿 | `action=SKIPPED`，`fix_action` 空，两表 0 行 | 通过 |
+| 三处相等 | `action=NONE`，`redisRemain 2 / dbRemain 2 / drift 0`，两表 0 行 | 通过 |
+| 负差异首轮 | 2 条 LOCKED 改 RELEASED → `dbRemain 4`、`drift −2`、`INFO`；`quota_report` 1 行 `balanced=0` | 通过 |
+| 跨一个周期 | 间隔 8.78s 再跑 → `WARN`、`consecutiveNegative=true`，文案「连续两个周期为负」 | 通过 |
+| 连点两次 | 间隔 0.16s → 两次都 `INFO`、`consecutive=false`（下界 `interval/2` 生效） | 通过 |
+| 正差异 | `INCR` 4 次（2→6）→ `drift +2`、`WARN`、`consecutive=false` | 通过 |
+| key 缺失 | `DEL quota:stock:14` → `STOCK_KEY_MISSING`，diff 行数 **6→6 不变**，ERROR 带 `raw=null` | 通过 |
+| 人工修回 | 2 条改回 LOCKED + 重发布补 key（`remain=2`）→ 回到 `NONE`，不再写行 | 通过 |
+
+开关：`--campusslot.reconcile.enabled=true` 时 10 秒一轮，连续 3 轮各扫 4 个活动、全 `NONE`、0 ERROR；
+去掉开关后 40 秒内 **0 条对账日志**、0 ERROR。
+
+### 1. 正差异算错次数，会得到"什么都没发生"
+
+方案第一版写的是"`INCR` 两次"，因为它默认 Redis 基数 2、DB 余量 2。但第 3 条判据把 2 条记录改成了 RELEASED，
+`dbRemain` 变成 **4**——它是 `total − (LOCKED + CONFIRMED)` 的**反推值**，不是 `quota_resource.remain` 那一列（还是 2）。
+于是 `INCR` 两次得到 6−4 = **+2？不，是 4−4 = 0**，直接走 `NONE`。
+现场表现是"正方向判定失效"，会让人去翻代码，而代码是对的。
+教训：这套系统里"还剩多少"至少有三个值（列值 / 反推值 / Redis 值），写判据时必须写清是哪一个。
+最终 `INCR` 4 次，`drift +2` 一次命中。
+
+### 2. "连续两个周期"不能靠"我再点一次"
+
+最初想用"连跑两次看是否升级"当判据。不行：`consecutiveNegative()` 读库里上一条 `SCAN` 记录，
+要求间隔落在 `[interval/2, interval*2]`。几秒内连点属于**手动操作**，不该算一个周期——不然验收会自己制造告警。
+实测：0.16 秒内两次都 `INFO`；等 8.78 秒（> 5s）才升级成 `WARN`。
+两个边界都不能省：下界拦"连点"，上界拦"停了一小时再跑"（中间根本没观测，不能认定连续）。
+
+### 3. 验完 `DEL` key 不收尾，会把下一段实验搅浑
+
+`DEL` 之后 r14 仍是 `PUBLISHED`。此时如果直接开定时任务，每一轮都会判 `keyMissing` 打一条 ERROR——
+更糟的是，若中间重发布过（SETNX 按 `remain` 列回填 2，而 `dbRemain` 是 4），drift 会立刻变成 **−2**，
+每 10 秒往 `reconcile_diff` 和 `quota_report` 各写一行，把"要给人看的那张差异表"填满。
+所以验收末尾加了一步"改回 LOCKED + 重发布 → 跑出 `NONE`"：既清场，又顺手证明"人修完巡检认得"。
+
+### 两件没做和一件改了口径的
+
+- **没复现 A1 那条"幽灵成功"当正差异样本**：它要求发布那一刻正好有在途消息，靠运气。改用 `INCR` 直接造，判定分支相同、结果确定。代价是 `publish` 回填 `remain` 的 P0 提示仍只有 A1 那一次手工证据。
+- **`reconcile_diff` 没有 severity 列**：级别只在返回体和日志里，库里靠 `fix_action` 首句区分。原计划写的"落表分级"实际只落了一列文案，读表的人别去找 `severity`。
+- **`SKIPPED` 只能手动触发**：`ReconcileJob.poll()` 只取 `PUBLISHED` 和"已关闭且无报表"，DRAFT 根本进不了扫描列表。原计划"定时任务会遍历所有活动"这句不成立，草稿分支只是 `reconcile()` 的兜底。
+
+---
+
 ## v1.0 归档 · D0-D5（2026-10-20，自研存储引擎阶段）
 
 > 方案已废弃，记录保留。

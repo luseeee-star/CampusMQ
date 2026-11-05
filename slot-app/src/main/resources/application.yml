@@ -114,6 +114,10 @@ campusslot:
     # 还需要该活动真的配了学院行才会生效（见 ResourceMetaCache#loadFromDb）。
     college-quota-enabled: ${COLLEGE_QUOTA_ENABLED:false}
   reconcile:
+    # SYS-3 巡检总开关。**默认关**，生命周期是「验收时开、验完关、B 块结束再开」。
+    # 默认关的理由是代价不对称：忘了开只是暂时没巡检；忘了关会每 5 分钟扫全部活动、
+    # 写 reconcile_diff，把 B 块注入的故障信号和巡检告警混在一起，污染一整天压测数据。
+    enabled: ${RECONCILE_ENABLED:false}
     # SYS-3：每 5 分钟比对 Redis 与 DB。调小会让对账任务自己变成压测负载，别为了「更安全」调到 10 秒
     interval-ms: ${RECONCILE_INTERVAL_MS:300000}
     # 巡检单批上限，避免一次把整表拉进内存

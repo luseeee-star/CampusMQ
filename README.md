@@ -38,7 +38,8 @@
 | **D11 A1 建活动 + 发布** | ✅ `POST /api/admin/resources` + `/publish`：名单与学院配额随建活动写入，发布灌三类 key，重入不覆盖（`stock 9→9`、删 key 后只补缺）；四条拒绝路径实测 1001/1003/2007 |
 | **D11 A2 进度 + 对账导出** | ✅ `GET /{id}/progress` 三套账并列（DB 余量 / Redis 余量 / 由记录反推的应有余额）+ `GET /{id}/export.csv`（配置口径与实际口径并排，「未分学院」桶显式保留）；`deptId` 可选过滤，与活动不符直接 1001 |
 | **A 块验收 smoke** | ✅ 五条判据全绿（2026-11-05 傍晚）：名单外 1005 走 mq 入口；删三类 key 后重发各补 1、再发写入 0；`/drain` 后三数相等 `drift 0`；2002「你所在学院的名额已满」与 2001「名额已满」文案可区分；CSV 的 BOM 用 Excel 真打开验证过中文 |
-| D5 拐点压测 | ⬜ 下一步：单 key 拐点 QPS + P99 曲线（Gatling 从这里开始上） |
+| **D9/SYS-3 A3 对账巡检** | ✅ 开关默认关（`campusslot.reconcile.enabled`），手动 `POST /api/admin/reconcile/run?resourceId=` + 定时任务两条路径都通。八条判据实测（2026-11-05 傍晚）：草稿 `SKIPPED`、平分 `NONE` 且两表 0 行、2 条记录改 RELEASED → drift **−2** 首轮 `INFO`、隔一个周期升 `WARN`、5 秒内连点不升级、`INCR` 4 次 → **+2** `WARN`、`DEL` key → 只打 ERROR 且 diff 行数不变、人工修回后回到 `NONE`；开开关 3 轮各扫 4 个活动全平，关开关 40 秒 0 条对账日志 |
+| B 块故障矩阵 | ⬜ 下一步：D10 五行故障（磁盘排最后）+ 拐点 3 点，靶子用 r1 |
 
 ## 2. 目录结构
 
@@ -54,7 +55,7 @@ campusslot/
 │       │   ├── AsyncClaimService       对照组③：Redis 判定 + MQ 投递（D3 起主链路）
 │       │   ├── ResourceMetaCache       主链路上最后一次 DB 往返靠它搬走
 │       │   └── ClaimDevController      reset / stat / drain 三个实验工具
-│       ├── reconcile/          SYS-3：每 5 分钟巡检 Redis 与 DB 差异 + 出报表   ← D9
+│       ├── reconcile/          SYS-3：巡检 Redis 与 DB 差异 + 报表，默认关（A3）   ← D9
 │       └── controller/         环境自检与 dev 端点
 ├── slot-consumer/              消费者进程（8082），可单独 kill 做故障注入
 │   └── com.campusslot.consumer/
@@ -242,7 +243,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy/dev-server.ps1 up `
 **不需要开这个开关**。但它靠「从 `quota:roster:{rid}:{sid}` 取到学院编码」来判成员，
 所以名单每一行都必须带 `college_code`——只给学号的名单灌完一个 key 都没有，全场 1005，而且不报错。
 
-### 3.5 管理端四个接口（D11 / A1 + A2，2026-11-05）
+### 3.5 管理端接口（D11 / A1 + A2，巡检见 3.5 末节 A3）
 
 建活动、发布、进度、对账导出。**目前没有鉴权**（系统里还没有管理端身份体系，写"只能建本部门的活动"只是装饰，
 伪造成本为零；上线前必须先补——眼下任何人都能把全校名单导走）。
@@ -321,6 +322,38 @@ curl --noproxy '*' "http://127.0.0.1:8080/api/admin/resources/2/progress?deptId=
 两张表没有可靠的一一对应关系（配额可以不覆盖所有学院，名单也可能写了配额里没有的编码），硬 JOIN 会丢行。
 `quota_record` **没有 `college_code` 列**，所以学院维度是"**名单上写的**"，不是"发那一刻扣的"——
 报告里引用这列数必须先说明来源。
+
+#### 对账巡检（A3 / SYS-3）
+
+```bash
+# 手动跑一个活动。必带 resourceId——没有“跑全部”这种用法
+curl --noproxy '*' -X POST "http://127.0.0.1:8080/api/admin/reconcile/run?resourceId=3"
+
+# 定时任务默认关；开关和间隔都走命令行，别改配置文件
+java -jar slot-app/target/slot-app.jar --campusslot.reconcile.enabled=true
+# 验收时把周期压到 10 秒，看得见“连续两个周期”的升级；跑完必须回到默认
+java -jar slot-app/target/slot-app.jar --campusslot.reconcile.enabled=true --campusslot.reconcile.interval-ms=10000
+```
+
+返回值里的 `action` 有五种，处置完全不同：
+
+| action | 什么情况 | 落不落表 |
+|---|---|---|
+| `NONE` | 三处相等 | **一张都不写**（全平落表会把真差异埋掉） |
+| `DIFF` | `redisRemain` 与"由记录反推的余量"不等 | 写 `reconcile_diff` + `quota_report` |
+| `STOCK_KEY_MISSING` | 库存 key 不存在或不是整数 | **不写 diff**，只打 ERROR（写 0 会造出 `drift = −total` 的假差异） |
+| `SKIPPED` | 草稿还没 key | 不写（只能手动触发，定时任务不扫草稿） |
+| `REPORT_FINAL` | 活动已关闭，补一份可归档报表 | 写 `quota_report`，幂等 |
+
+级别：**正差异（Redis 比库多）第一次就 WARN**；负差异先 INFO，连续两个周期仍为负才升级——"在途消息"最多持续一个周期。
+这里的"连续"读的是库里上一条 `SCAN` 记录，且间隔必须落在半个到一个周期之间：几秒内连点两次不算一个周期，停了一小时再跑也不算。
+
+**它只发现、不修**：`fixed_at` 一律留空。Redis 和 DB 谁对取决于差异方向（在途消息时 Redis 对，记录被删时 DB 对），
+自动回填猜错一次就是静默丢名额。修完再跑一次 `NONE`，就是这条链路的闭环证据。
+
+**压测/故障注入期间必须关掉**：它每 5 分钟扫全表、写两张表、抢数据库连接，还会把 B 块故意注入的"删记录"提前报出来，
+两条信号混在一起就分不清是巡检先发现还是注入生效。
+
 
 「未分学院」那一行（`college_code` 为空）**是真实存在的桶，不是空值噪音**：`roster_required=0` 的活动
 （r1、r3）整份记录都 join 不上名单，手工插的记录也 join 不上。三份来源取**并集**、`null` 单独成一桶排在最后、
