@@ -634,7 +634,7 @@ curl -X POST "http://127.0.0.1:8080/api/claim/dev/reset?resourceId=2"
  "colleges":[{"college":"CS","quota":20,"dbRemain":0,"redisRemain":0}, "…EE/ME/ART 同"]}
 ```
 
-**四条必须讲清楚的设计：**
+**五条必须讲清楚的设计：**
 
 1. **`-4`（学院满）与 `-1`（全场满）必须是两个码。** 混用会让学生看到"名额已满"
    而进度条显示还有剩余，然后反复刷新投诉（R-8 明确要求「不得静默失败/提示含糊」）。
@@ -645,6 +645,13 @@ curl -X POST "http://127.0.0.1:8080/api/claim/dev/reset?resourceId=2"
    复杂度会相乘）。现在留的是"实现了、可开启、默认不动"。
 4. **学院编码来自 `quota:roster:{rid}:{sid}` 单 key**，不是在 Lua 里动态拼 key。
    学院开启时才多一次 GET，默认路径零额外开销。
+5. **名单判定只对 `/api/claim/mq` 生效，而且当前还挂在学院配额开关上。**
+   同步入口 `/api/claim` 用的 `claim_basic.lua` 里**一次名单判定都没有**，不管开关怎么配，谁都能抢；
+   异步入口的 `useCollegeQuota()` 要求 `roster_required` 与 `college-quota-enabled` **同时**成立
+   （缓存层再与一次「有没有学院行」），而开关默认 `false` —— 所以只配名单、不配学院配额的活动，
+   名单等于不存在，且不会报错。验证 P4 必须用异步入口 + 显式打开开关。
+   > 待改（A1）：把判定拆成「查不查名单」和「扣不扣学院配额」两个，拆完 `roster_required=1` 不再要求配学院配额。
+   > 同步入口不补名单判定——它是 D3 的对照组，多一次 GET 会污染对照组数字。
 
 ### 顺带验证的兜底
 
