@@ -1,0 +1,1 @@
+{"code":0,"message":"ok","data":{"resourceId":16,"status":"DRAFT","deptId":1,"totalQuota":3,"remain":3,"openAt":"2026-11-05T17:30:00","closeAt":"2026-11-05T22:00:00","confirmTimeoutSec":1800,"rosterRequired":true,"collegeRows":2,"rosterRows":4,"rosterDuplicates":0,"warnings":[]},"success":true}

@@ -1,0 +1,8 @@
+﻿A1=# CampusSlot 对账导出
+A2=# 活动 16「A 块验收·名单与学院配额（3 个名额）」 状态 PUBLISHED 部门 1
+A3=# 导出时间 2026-11-05 17:35:41
+A14=CS
+B14=CS
+A16=TOTAL
+B16=合计
+usedRows=19

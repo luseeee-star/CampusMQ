@@ -1,0 +1,9 @@
+== E1 CS 第 1 人（应成功）==
+{"code":0,"message":"ok","data":{"resourceId":16,"status":"LOCKED","remain":2},"success":true}
+== E1 CS 第 2 人（应 2002，总额还有 2）==
+{"code":2002,"message":"你所在学院的名额已满","success":false}
+== E2 第 1、2 人（应成功）==
+{"code":0,"message":"ok","data":{"resourceId":17,"status":"LOCKED","remain":1},"success":true}
+{"code":0,"message":"ok","data":{"resourceId":17,"status":"LOCKED","remain":0},"success":true}
+== E2 第 3 人（应 2001）==
+{"code":2001,"message":"名额已满","success":false}

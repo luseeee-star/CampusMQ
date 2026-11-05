@@ -1,0 +1,36 @@
+# 验收证据（入库副本）
+
+`logs/` 整个目录在 `.gitignore:43` 里，现场日志不会进仓库。**对外可引用的证据一律以本目录为准**，
+`logs/acceptance-a-*` 只是同一批文件的现场副本。
+
+## 2026-11-05 · A 块验收
+
+目录 `2026-11-05/`，23 个文件，与 `logs/acceptance-a-2026-11-05/` 内容逐字节一致（`diff -r` 验过）。
+
+| 文件 | 是什么 | 对应判据 |
+|---|---|---|
+| `台账.md` | **先看这个**：每行一条判据（样本按标题引用、期望、实际、证据文件名、原日志行号） | 全部 |
+| `00-create-e1/e2.json`、`00-publish-r16/r17.json` | 两个样本活动的建单与发布响应（r16 学院配额、r17 总名额） | 2、3、4 |
+| `01-claim-1005.json` | 名单外学号走 `/api/claim/mq` 的拒绝响应 | 1 |
+| `02-publish-rerun.json` | 删 stock / CS / 一个名单 key 后连发两次的写入计数（`1/1/1` → `0/0/0`） | 2 |
+| `03-drain-r16/r17.json`、`03-stat-r16.json`、`03-progress-r16/r17.json` | 排干后三数、名单行数与 key 数、各学院两列 | 3 |
+| `04-2002-vs-2001.json` | 学院满额与总名额满额的文案区分（同一时刻总额仍有剩） | 4 |
+| `05-export.csv`、`05-excel-verify.txt` | 导出原始字节（BOM 保留）+ Excel COM 实际读到的单元格 | 5 |
+| `06-*.json`、`06-report-row.txt` | 唯一从未执行过的 `writeFinalReport` 分支：手工置 `CLOSED` 后 10 秒落 1 行、再跑不写第 2 行 | 0 |
+| `a-block.log` | 从 `logs/a3-final.log` 筛出的带时间戳行（13 行），**行号即原文件行号** | 0–5 |
+
+### 两个引用时必须注意的口径
+
+1. **`a-block.log` 的行号指不到本仓库里的文件**。原始 `a3-final.log` 有 SQL 行且不入库，台账里"日志行 1527"这类引用
+   只能靠 `a-block.log` 里保留下来的行号前缀核对。要完整复现就得重跑，不是翻仓库。
+2. **这批证据证明的是"分支写对了"，不是"链路通了"**：`writeFinalReport` 的 `CLOSED` 是手工 `UPDATE` 造出来的，
+   产品里没有任何代码会把活动置 `CLOSED`（R-7 因此定级 ⚠️，见 `README.md` §3.5「手工关账」）。
+3. **10 秒不是生产值**：那是把 `--campusslot.reconcile.interval-ms` 压到 10000 的测试值，
+   生产口径是"关账后 ≤1 个巡检周期（默认 5 分钟）出终版报表"。
+
+### 采集环境
+
+`slot-app` 8080（`college-quota-enabled=true`、`dev-endpoints=true`、巡检 `enabled=true interval-ms=10000`、
+`logging.level.com.campusslot=INFO`）+ `slot-consumer` 8082；MySQL 127.0.0.1:3307、Redis 6379 均为 docker 容器。
+注意 `INFO` 并**不能**关掉 SQL 日志（`StdOutImpl` 绕过 logback），所以证据日志是二次过滤后的；B1 压测必须用
+`--spring.profiles.active=bench`，两者的数字不可比。

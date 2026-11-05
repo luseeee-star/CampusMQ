@@ -1,0 +1,8 @@
+-- quota_report 终版报表行（r15）
+id	resource_id	total_quota	applied_cnt	granted_cnt	locked_cnt	confirmed_cnt	released_cnt	remain	balanced	generated_at
+7	15	1	1	1	1	0	0	0	1	2026-11-05 17:34:48
+-- 三个验收活动状态
+id	title	status	total_quota	remain
+15	A 块验收·终版报表（1 个名额）	CLOSED	1	0
+16	A 块验收·名单与学院配额（3 个名额）	PUBLISHED	3	2
+17	A 块验收·总名额满（2 个名额）	PUBLISHED	2	0

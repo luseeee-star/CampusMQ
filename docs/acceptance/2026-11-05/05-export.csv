@@ -1,0 +1,19 @@
+﻿# CampusSlot 对账导出
+# 活动 16「A 块验收·名单与学院配额（3 个名额）」 状态 PUBLISHED 部门 1
+# 导出时间 2026-11-05 17:35:41
+# 总名额 3 / DB 余量 2 / Redis 余量 2 / 已锁定 1 / 已确认 0 / 已释放 0（超时 0、取消 0）
+# 名单 4 行 / Redis key 4 个
+# 口径一（配置）：quota 来自 quota_college，是「最多给几个」
+# 口径二（实际）：locked/confirmed/issued/released 来自 quota_record，是「实际领走几个」
+#   按学院分组只能 LEFT JOIN quota_roster（quota_record 没有 college_code 列），
+#   名单外的记录落在「未分学院」桶，它是真实存在的一行，合计包含它
+#   学院是「名单上写的」，不是「扣减那一刻的」
+# drift = remain_redis - remain_db；空表示 Redis key 不存在
+
+college_code,college_label,configured,quota,remain_db,remain_redis,drift,roster_rows,locked,confirmed,issued,released
+CS,CS,1,1,0,0,0,2,1,0,1,0
+EE,EE,1,2,2,2,0,2,0,0,0,0
+TOTAL,合计,,3,2,2,0,4,1,0,1,0
+
+# 合计校验：各学院 issued 之和 = 1，活动总计 issued = 1，一致
+# 配置限额之和 = 3，总名额 = 3

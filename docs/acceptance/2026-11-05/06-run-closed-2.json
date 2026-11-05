@@ -1,0 +1,1 @@
+{"code":0,"message":"ok","data":{"resourceId":15,"resourceStatus":"CLOSED","totalQuota":1,"records":1,"locked":1,"confirmed":0,"released":0,"dbIssued":1,"dbRemain":0,"dbRemainColumn":0,"stockKeyMissing":false,"action":"REPORT_FINAL","consecutiveNegative":false,"reportWritten":false,"note":"该活动已有报表，跳过"},"success":true}

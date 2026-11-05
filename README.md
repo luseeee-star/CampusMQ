@@ -38,7 +38,7 @@
 | **D11 A1 建活动 + 发布** | ✅ `POST /api/admin/resources` + `/publish`：名单与学院配额随建活动写入，发布灌三类 key，重入不覆盖（`stock 9→9`、删 key 后只补缺）；四条拒绝路径实测 1001/1003/2007 |
 | **D11 A2 进度 + 对账导出** | ✅ `GET /{id}/progress` 三套账并列（DB 余量 / Redis 余量 / 由记录反推的应有余额）+ `GET /{id}/export.csv`（配置口径与实际口径并排，「未分学院」桶显式保留）；`deptId` 可选过滤，与活动不符直接 1001 |
 | **A 块验收 smoke** | ✅ 五条判据全绿（2026-11-05 傍晚）：名单外 1005 走 mq 入口；删三类 key 后重发各补 1、再发写入 0；`/drain` 后三数相等 `drift 0`；2002「你所在学院的名额已满」与 2001「名额已满」文案可区分；CSV 的 BOM 用 Excel 真打开验证过中文 |
-| **A 块验收（正式记录）** | ✅ 2026-11-05 晚：五条判据按标题取样重放（1005 / 重发布 1-1-1→0-0-0 / 三数 2-2-2 / 2002 与 2001 / CSV+BOM+Excel），另补上此前从未执行过的 `writeFinalReport`——CLOSED 后 10 秒出 1 行报表、再跑不写第二行。原始证据在 `logs/acceptance-a-2026-11-05/`（`logs/` 不入库） |
+| **A 块验收（正式记录）** | ✅ 2026-11-05 晚：五条判据按标题取样重放（1005 / 重发布 1-1-1→0-0-0 / 三数 2-2-2 / 2002 与 2001 / CSV+BOM+Excel），另补上此前从未执行过的 `writeFinalReport`——CLOSED 后 10 秒出 1 行报表、再跑不写第二行。原始证据已归档入库：`docs/acceptance/2026-11-05/`（23 个文件 + `台账.md`），`logs/` 那份只作现场 |
 | **D9/SYS-3 A3 对账巡检** | ✅ 开关默认关（`campusslot.reconcile.enabled`），手动 `POST /api/admin/reconcile/run?resourceId=` + 定时任务两条路径都通。八条判据实测（2026-11-05 傍晚）：草稿 `SKIPPED`、平分 `NONE` 且两表 0 行、2 条记录改 RELEASED → drift **−2** 首轮 `INFO`、隔一个周期升 `WARN`、5 秒内连点不升级、`INCR` 4 次 → **+2** `WARN`、`DEL` key → 只打 ERROR 且 diff 行数不变、人工修回后回到 `NONE`；开开关 3 轮各扫 4 个活动全平，关开关 40 秒 0 条对账日志 |
 | B 块故障矩阵 | ⬜ 下一步：D10 五行故障（磁盘排最后）+ 拐点 3 点，靶子用 r1 |
 
@@ -65,7 +65,7 @@ campusslot/
 ├── deploy/                     compose / broker.conf / prometheus.yml / sql / topic-init.sh / reset.sh
 │                               dev-server.ps1（启停服务） / experiment.ps1（一次调用跑完一轮实验）
 ├── benchmark/                  压测脚本与数据生成器（D5/D10 起换 Gatling）
-├── docs/                       设计文档（archive 为已废弃 v1.0）
+├── docs/                       设计文档；archive/ 已废弃 v1.0 与计划书快照；acceptance/ 验收证据（入库，logs/ 只作现场）
 └── LOGBOOK.md                  每天「没按预期发生的事」
 ```
 
@@ -244,7 +244,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy/dev-server.ps1 up `
 **不需要开这个开关**。但它靠「从 `quota:roster:{rid}:{sid}` 取到学院编码」来判成员，
 所以名单每一行都必须带 `college_code`——只给学号的名单灌完一个 key 都没有，全场 1005，而且不报错。
 
-### 3.5 管理端接口（D11 / A1 + A2，巡检见 3.5 末节 A3）
+### 3.5 管理端接口（D11 / A1 + A2，巡检与关账见本节末）
 
 建活动、发布、进度、对账导出。**目前没有鉴权**（系统里还没有管理端身份体系，写"只能建本部门的活动"只是装饰，
 伪造成本为零；上线前必须先补——眼下任何人都能把全校名单导走）。
@@ -360,6 +360,41 @@ java -jar slot-app/target/slot-app.jar --campusslot.reconcile.enabled=true --cam
 （r1、r3）整份记录都 join 不上名单，手工插的记录也 join 不上。三份来源取**并集**、`null` 单独成一桶排在最后、
 **参与合计**。让 `GROUP BY` 吃掉它，各学院加起来就会比总数少，看起来像丢了几条记录。
 
+#### 手工关账（当前唯一路径，2026-11-05 补记）
+
+**活动没有关账 job，也没有关闭接口**——`PUBLISHED → CLOSED` 没有任何代码路径（全仓四处 `CLOSED` 都在判定、枚举、注释里）。
+学生侧的关闭本来就不靠它：`ResourceMeta.isOpen()` 在 `close_at` 一过就返回 false。所以关账不是安全开关，它只做三件事：
+让终版报表自动归档、挡住误重发布、让"已结束"在库里可见。
+
+```sql
+-- 1. 看谁该关：close_at 已过、仍是 PUBLISHED、没有还锁着的记录
+SELECT r.id, r.title, r.close_at,
+       (SELECT COUNT(*) FROM quota_record q WHERE q.resource_id = r.id AND q.status = 'LOCKED') AS locked
+FROM quota_resource r
+WHERE r.status = 'PUBLISHED' AND r.close_at < NOW()
+ORDER BY r.close_at;
+
+-- 2. 只迁移状态。不碰 Redis：清 key 归清理脚本，和 9001 孤儿 key 同一口径
+UPDATE quota_resource SET status = 'CLOSED' WHERE id = <id> AND status = 'PUBLISHED';
+
+-- 3. 等一个巡检周期，终版报表应出现，且只为该活动出现一次
+SELECT id, resource_id, total_quota, applied_cnt, granted_cnt, locked_cnt, remain, balanced, generated_at
+FROM quota_report WHERE resource_id = <id>;
+```
+
+判据三条：`locked = 0` 才关（否则报表里的 `locked_cnt` 记的是中间态）；`quota_report` 出 **1 行**且 `balanced = 1`；
+再等一轮不新增第 2 行（`writeFinalReport` 有 `hasReport` 幂等，与持续差异每周期落行的 `writeReport` 不同）。
+
+**对外只能用"关账后 ≤1 个巡检周期（默认 5 分钟）出终版报表"**，不要引用验收记录里的 10 秒——那是把
+`--campusslot.reconcile.interval-ms` 压到 10000 的测试值，不是生产值。
+
+自动化版本排到 B 块之后（B1 前夜不引入重启 + 回归），规格已定：`CloseJob` + `campusslot.close.enabled` **默认 false**
+（和巡检同一种开关形式）；宽限期 60 分钟（`close_at` 之后不再产生 LOCKED，最后一批在 `close_at + CONFIRM_TIMEOUT` 被
+sweeper 释放，留一倍裕度）；逐条 `WHERE status='PUBLISHED' AND close_at < NOW() - INTERVAL 60 MINUTE` 条件更新，
+0 行 = 已被人工或并发关掉，跳过不报错；关闭后直接复用 `writeFinalReport`，让"关账 → 报表"只有一条实现；
+**全程不碰 Redis**。也没有"基线三活动白名单"——r1/r2/r3 的 `close_at` 在 11-11/11-12，B 块窗口内条件根本关不到它们，
+时间本身就是保护，白名单反而会漏掉新造的测试活动、之后变成技术债。
+
 ## 4. 环境变量与可调参数
 
 | 变量 | 默认 | 说明 |
@@ -393,7 +428,8 @@ java -jar slot-app/target/slot-app.jar --campusslot.reconcile.enabled=true --cam
 `notification`（带 `next_retry_at`）、`idempotent_log`（带 `record_id`，支撑 R-3 复现首次结果）、
 `reconcile_diff`、`quota_report`（R-7 的可归档报表：**有差异的活动每巡检周期落一份快照**，
 取 `generated_at` 最新的一份；活动关闭后另落一份终版，那份才幂等。
-注意活动目前**没有任何关账动作**——没人把 `PUBLISHED` 置 `CLOSED`，终版报表只能手工触发，详见 §3.5 末节）。
+注意活动目前**没有任何关账动作**——没有任何代码路径把 `PUBLISHED` 置 `CLOSED`，终版报表只能靠手工关账触发，
+三步 SQL 与判据见 §3.5 末的「手工关账」；关账 job 排在 B 块之后，规格也在那一节。
 
 ## 6. MQ 拓扑
 
@@ -441,6 +477,9 @@ D3 之前两者共用一个消费组，一旦消费者开始写库，每调一�
 - **SQL 日志会同时掩盖性能和竞态**：`StdOutImpl` 开着时裸版超卖 54–67 件，关掉后 65–86 件。
   打印发生在持有连接期间，连接周转变慢、有效并发被压低。对照实验必须固定日志配置，
   压测一律加 `--spring.profiles.active=bench`。
+  **反过来不成立：`--logging.level.com.campusslot=INFO` 关不掉 SQL**——`StdOutImpl` 绕过 logback 直写 stdout，
+  验收那次"INFO 日志"里仍全是 SQL 行。所以纪律是**「压测用 bench，看告警用默认 profile」**，不要试图在同一个进程里
+  同时做这两件事：bench 把 `com.campusslot` 压到 `WARN`，巡检的 DIFF/INFO 会被吞掉，而 `root: INFO` 保得住 P0 的 ERROR。
 - **Git Bash 会把 `/api/...` 参数改写成 Windows 路径**，传给压测器的 path 会变成
   `D:/.../PortableGit/api/claim`。要么 `export MSYS_NO_PATHCONV=1`，要么直接用 PowerShell。
 - `HttpRequest.newBuilder()` 若写在 try 外，URL 拼错时线程直接死、`err` 不计数，

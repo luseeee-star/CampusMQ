@@ -1,0 +1,4 @@
+# 验收证据按原始字节入库，禁止任何行尾/编码规范化
+# 理由：05-export.csv 的 BOM 与 LF 行尾本身就是判据（Excel 能否正确识别 UTF-8），
+# core.autocrlf=true 会在 checkout 时把 LF 换成 CRLF，字节就变了。
+docs/acceptance/** -text

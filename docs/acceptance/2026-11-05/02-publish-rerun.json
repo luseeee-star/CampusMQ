@@ -1,0 +1,6 @@
+== 删三类 key ==
+3
+== 重发布（应各补 1）==
+{"code":0,"message":"ok","data":{"resourceId":16,"beforeStatus":"PUBLISHED","afterStatus":"PUBLISHED","statusMigrated":false,"onlyIfAbsent":true,"stockRemain":3,"collegeRows":2,"collegeKeysWritten":1,"rosterRows":4,"rosterKeysWritten":1,"notes":["库存 key 原本缺失，已按数据库 remain=3 回填。若发布时还有消息未落库，这个值会偏大（多放出 pending 个名额）：发布后先 /api/claim/dev/drain 等账平，再看 stat 的 drift 是否为 0","当前已是 PUBLISHED，本次只补缺（SETNX）；没写的 key 说明本来就存在"]},"success":true}
+== 再发一次（应全 0）==
+{"code":0,"message":"ok","data":{"resourceId":16,"beforeStatus":"PUBLISHED","afterStatus":"PUBLISHED","statusMigrated":false,"onlyIfAbsent":true,"stockRemain":3,"collegeRows":2,"collegeKeysWritten":0,"rosterRows":4,"rosterKeysWritten":0,"notes":["当前已是 PUBLISHED，本次只补缺（SETNX）；没写的 key 说明本来就存在"]},"success":true}
