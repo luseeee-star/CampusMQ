@@ -7,6 +7,13 @@
 --   id=2  团操课         80 名额，带学院配额（验证 quota_college 真拦得住）
 --   id=3  迎新物资     3000 名额，瞬时冲击最大（S3 大名额 + 高 QPS）
 
+-- 必须先声明连接字符集，这一行不能删。
+-- 文件本身是 UTF-8，但 mysql 客户端的 character_set_client 默认取编译选项/locale
+-- （这台机器的容器里是 latin1）。不声明的话，下面的中文会以「UTF-8 字节被当 latin1」
+-- 的方式入库，读出来是「ç§‹å­£å¢žè¯¾」这种乱码——2026-11-05 的库里 r1/r2/r3
+-- 三行标题就是这么坏的，而且因为字符本身合法，任何长度校验都发现不了。
+SET NAMES utf8mb4;
+
 USE campusslot;
 
 INSERT INTO dept (id, code, name, contact, status) VALUES

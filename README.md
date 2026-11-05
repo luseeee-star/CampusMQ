@@ -36,6 +36,7 @@
 | **落库去重加固** | ✅ 去掉 `INSERT IGNORE`，改 `DuplicateKeyException` 分流；约束错误不再被 ACK 吞掉 |
 | **压测器上限标定** | ✅ 空转端点实测 **4500 req/s**（保守值），D3 的 490 只占其 11%，D5 曲线可信 |
 | **D11 A1 建活动 + 发布** | ✅ `POST /api/admin/resources` + `/publish`：名单与学院配额随建活动写入，发布灌三类 key，重入不覆盖（`stock 9→9`、删 key 后只补缺）；四条拒绝路径实测 1001/1003/2007 |
+| **D11 A2 进度 + 对账导出** | ✅ `GET /{id}/progress` 三套账并列（DB 余量 / Redis 余量 / 由记录反推的应有余额）+ `GET /{id}/export.csv`（配置口径与实际口径并排，「未分学院」桶显式保留）；`deptId` 可选过滤，与活动不符直接 1001 |
 | D5 拐点压测 | ⬜ 下一步：单 key 拐点 QPS + P99 曲线（Gatling 从这里开始上） |
 
 ## 2. 目录结构
@@ -46,7 +47,7 @@ campusslot/
 ├── slot-app/                   API 侧唯一进程（8080），功能在包内分层：
 │   └── com.campusslot.app/
 │       ├── gateway/            身份解析 + traceId 落地（Servlet Filter）
-│       ├── resource/           G-1/G-2 建活动 + 发布（A1 已完成，2026-11-05）；G-3/G-4 待 A2 接上
+│       ├── resource/           G-1~G-4 管理端四个接口：建活动、发布、进度、对账导出（A1+A2，2026-11-05）
 │       ├── claim/              S-1~S-5：抢名额、确认、取消、我的记录             ← D2–D8
 │       │   ├── ClaimService            对照组②：Redis 判定 + 同步落库
 │       │   ├── AsyncClaimService       对照组③：Redis 判定 + MQ 投递（D3 起主链路）
@@ -240,10 +241,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy/dev-server.ps1 up `
 **不需要开这个开关**。但它靠「从 `quota:roster:{rid}:{sid}` 取到学院编码」来判成员，
 所以名单每一行都必须带 `college_code`——只给学号的名单灌完一个 key 都没有，全场 1005，而且不报错。
 
-### 3.5 建活动 + 发布（D11 / A1，2026-11-05 起）
+### 3.5 管理端四个接口（D11 / A1 + A2，2026-11-05）
 
-两个接口，管理端用，**目前没有鉴权**（系统里还没有管理端身份体系，写"只能建本部门的活动"只是装饰，
-伪造成本为零；上线前必须先补）。
+建活动、发布、进度、对账导出。**目前没有鉴权**（系统里还没有管理端身份体系，写"只能建本部门的活动"只是装饰，
+伪造成本为零；上线前必须先补——眼下任何人都能把全校名单导走）。
 
 ```bash
 # 1) 建草稿（G-1 命名/名额/窗口 + G-2 名单 + 学院配额一次带进来）
@@ -281,6 +282,48 @@ curl --noproxy '*' -X POST http://127.0.0.1:8080/api/admin/resources/4/publish
 
 发布完立刻抢一次不能出现「活动还没开放」——那说明 `ResourceMetaCache.evict` 没生效，
 缓存要等 5 秒才自然过期，演示现场看起来像发布没成功。
+
+#### 进度与对账导出（A2）
+
+```bash
+# 进度：一次看全三套账
+curl --noproxy '*' http://127.0.0.1:8080/api/admin/resources/2/progress
+
+# 对账表：默认按学院分行；groupBy=none 只出合计
+curl --noproxy '*' -o reconcile.csv \
+  "http://127.0.0.1:8080/api/admin/resources/2/export.csv?groupBy=college"
+
+# 两个接口都收可选 deptId；传了就必须和活动所属部门一致，否则 1001（返回 0 会被误读成“没人领”）
+curl --noproxy '*' "http://127.0.0.1:8080/api/admin/resources/2/progress?deptId=2"
+```
+
+**`/progress` 为什么不是一个余量数字**：这个系统里"还剩多少"有三个答案，不等就说明问题出在哪一层。
+
+| 字段 | 含义 | 不等的含义 |
+|---|---|---|
+| `dbRemain` | 数据库看还剩多少 | 异步链路里它**滞后**于 Redis（消息还没落库） |
+| `redisRemain` | 学生实际能抢到的 | 这才是抢名额那一刻的真相 |
+| `expectRemain` | 总名额 − (已锁定 + 已确认) | 和 `dbRemain` 不等 → `remain` 这一列被绕过改过 |
+
+`drift = redisRemain − dbRemain`：> 0 是在途消息（压测刚停时正常），< 0 是 DB 多扣了（回补撞车或手工改 Redis），必须进对账。
+`stockKeyMissing` 单独给一个布尔位：库存 key 不存在时抢占会返回 `-3`「系统繁忙」，那是"活动挂了"而不是"发完了"。
+`rosterRows` 与 `rosterKeys` 不等就是名单漏灌——漏灌是静默的（学生被判 1005），只能靠这两个数对出来。
+
+**`dbBalanced` 这个名字里的 db 不能省**：它只说"数据库自己能不能对上"，不含 Redis 那一侧。
+库存 key 被删时它是 `true`、`redisMatchesDb` 是 `false`——两个字段一起看才知道系统好不好，叫 `balanced` 会误读。
+
+**导出的两套口径不要混成第三个数**：
+
+- **配置口径**（`quota_college`）：这个学院最多给几个；
+- **实际口径**（`quota_record LEFT JOIN quota_roster`）：这个学院实际领走几个。
+
+两张表没有可靠的一一对应关系（配额可以不覆盖所有学院，名单也可能写了配额里没有的编码），硬 JOIN 会丢行。
+`quota_record` **没有 `college_code` 列**，所以学院维度是"**名单上写的**"，不是"发那一刻扣的"——
+报告里引用这列数必须先说明来源。
+
+「未分学院」那一行（`college_code` 为空）**是真实存在的桶，不是空值噪音**：`roster_required=0` 的活动
+（r1、r3）整份记录都 join 不上名单，手工插的记录也 join 不上。三份来源取**并集**、`null` 单独成一桶排在最后、
+**参与合计**。让 `GROUP BY` 吃掉它，各学院加起来就会比总数少，看起来像丢了几条记录。
 
 ## 4. 环境变量与可调参数
 
@@ -697,7 +740,9 @@ curl -X POST "http://127.0.0.1:8080/api/claim/dev/reset?resourceId=2"
    异步入口的 `useCollegeQuota()` 要求 `roster_required` 与 `college-quota-enabled` **同时**成立
    （缓存层再与一次「有没有学院行」），而开关默认 `false` —— 所以只配名单、不配学院配额的活动，
    名单等于不存在，且不会报错。验证 P4 必须用异步入口 + 显式打开开关。
-   > 待改（A1）：把判定拆成「查不查名单」和「扣不扣学院配额」两个，拆完 `roster_required=1` 不再要求配学院配额。
+   > **已改（A1，`f966b86`）**：判定已经拆成 `needRosterCheck()`（查不查名单）和 `needCollegeQuota()`（扣不扣学院配额），
+   > `roster_required=1` 不再要求配学院配额。上面这段描述的是 D7 当时的状况，留作历史——
+   > 它解释了后来为什么"只配名单的活动"这个形态以前根本走不通。
    > 同步入口不补名单判定——它是 D3 的对照组，多一次 GET 会污染对照组数字。
 
 ### 顺带验证的兜底
