@@ -3537,6 +3537,48 @@ HTTP 响应体里加不加那三个字节，curl 和浏览器显示完全一样�
 
 ---
 
+## A 块验收正式记录（2026-11-05 17:34–17:36）
+
+A3 那八条判据只覆盖了"活动在 `PUBLISHED` 时的比对"。`writeFinalReport` 这条分支**从来没被执行过**——
+`quota_report` 当时是 0 行，不是清场清的，是没人走到。所以这轮先补它，再跑五条。
+
+**证据目录 `logs/acceptance-a-2026-11-05/`**（`logs/` 被 git 忽略，只在本机；结论与数字都落在本文和计划书里）：
+`台账.md` 是索引，其余是原始响应体、CSV 原始字节、Excel 单元格读取结果、日志片段（带原文件行号）。
+
+| 判据 | 结果 |
+|---|---|
+| 已关闭活动补终版报表 | 置 `CLOSED` 后 **10 秒**出 1 行（`total 1 / applied=granted=1 / locked 1 / remain 0 / balanced 1`）；第二轮 0 新增；手动 `/run` 两次都 `reportWritten=false`，`note=该活动已有报表，跳过` |
+| 名单外 1005 | `2025999999` → `1005 不在本次发放资格名单内`（走 `/api/claim/mq`） |
+| 发布可重入 | 删 stock + CS + 1 个名单 key → 重发 `college=1/2`、`roster=1/4`、`stock written=1`；再发 `0/0/0`；`MGET` 复原 `3 / 1 / CS` |
+| 三个数 | 16：`total 3 / db 2 / redis 2 / expect 2`、`drift 0`、`dbBalanced=true`、`rosterRows 4 = rosterKeys 4`、CS `0/0`、EE `2/2`；17：`2 / 0 / 0 / 0` |
+| 2002 ≠ 2001 | 16 第 2 个 CS → `2002 你所在学院的名额已满`（此时总额 `remain=2`）；17 第 3 人 → `2001 名额已满` |
+| CSV | 首三字节 `EF BB BF`；Excel COM 读到 `A2=# 活动 16「A 块验收·名单与学院配额（3 个名额）」`、`A16=TOTAL / B16=合计`，`usedRows=19` |
+
+### 1. `writeFinalReport` 有实现、无触发——R-7 目前只能算"写好了"
+
+全仓 grep `CLOSED` 只有四处：`ReconcileJob` 的判定、`ResourceStatus` 枚举、`ResourceAdminService:339` 的"不许重发布"、
+实体注释。**没有任何代码会把 `PUBLISHED` 改成 `CLOSED`**：没有关账 job，也没有关闭接口。
+于是 `ReconcileJob` 里那个 CLOSED 分支只能靠人手工 `UPDATE` 才会走到，本次就是手工造的。
+
+换句话说：R-7「每次发放留一份可归档报表」的真实状态是**代码在、链路不通**。
+两条路——定成操作纪律（归档时手工 UPDATE，写进 README），或 B 块后补一个关账 job
+（`close_at < now AND status='PUBLISHED'` → `CLOSED`，约 20 行，代价是一次重启 + 一轮回归）。这条待定。
+
+### 2. 报表行数 ≠ 发放次数
+
+`ReconcileService:133` 的 `writeReport` 是**无条件调用**的，幂等只做在 `writeFinalReport`（`!hasReport`）。
+所以持续差异会每个周期写一行。引用报表只能说"有差异的活动每周期一份快照，取最新一份"，
+不能写成"每次发放一份"——后者是 R-7 的原话，和实现对不上。
+
+### 3. `INFO` 挡不住 SQL，B1 必须用 `bench` profile
+
+`application.yml:52` 是 `log-impl: StdOutImpl`，它**绕过 logback 直写 stdout**，
+`--logging.level.com.campusslot=INFO` 之后 SQL 照样满屏（那些没有时间戳的行就是它）。
+只有 `--spring.profiles.active=bench`（`NoLoggingImpl` + `com.campusslot: WARN`）才真正关掉，
+这正是 D2 那次"295 req/s vs 关掉日志"的同一套口径。B1 只写"降 INFO"会测出不可比的数字。
+
+---
+
 ## v1.0 归档 · D0-D5（2026-10-20，自研存储引擎阶段）
 
 > 方案已废弃，记录保留。

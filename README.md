@@ -38,6 +38,7 @@
 | **D11 A1 建活动 + 发布** | ✅ `POST /api/admin/resources` + `/publish`：名单与学院配额随建活动写入，发布灌三类 key，重入不覆盖（`stock 9→9`、删 key 后只补缺）；四条拒绝路径实测 1001/1003/2007 |
 | **D11 A2 进度 + 对账导出** | ✅ `GET /{id}/progress` 三套账并列（DB 余量 / Redis 余量 / 由记录反推的应有余额）+ `GET /{id}/export.csv`（配置口径与实际口径并排，「未分学院」桶显式保留）；`deptId` 可选过滤，与活动不符直接 1001 |
 | **A 块验收 smoke** | ✅ 五条判据全绿（2026-11-05 傍晚）：名单外 1005 走 mq 入口；删三类 key 后重发各补 1、再发写入 0；`/drain` 后三数相等 `drift 0`；2002「你所在学院的名额已满」与 2001「名额已满」文案可区分；CSV 的 BOM 用 Excel 真打开验证过中文 |
+| **A 块验收（正式记录）** | ✅ 2026-11-05 晚：五条判据按标题取样重放（1005 / 重发布 1-1-1→0-0-0 / 三数 2-2-2 / 2002 与 2001 / CSV+BOM+Excel），另补上此前从未执行过的 `writeFinalReport`——CLOSED 后 10 秒出 1 行报表、再跑不写第二行。原始证据在 `logs/acceptance-a-2026-11-05/`（`logs/` 不入库） |
 | **D9/SYS-3 A3 对账巡检** | ✅ 开关默认关（`campusslot.reconcile.enabled`），手动 `POST /api/admin/reconcile/run?resourceId=` + 定时任务两条路径都通。八条判据实测（2026-11-05 傍晚）：草稿 `SKIPPED`、平分 `NONE` 且两表 0 行、2 条记录改 RELEASED → drift **−2** 首轮 `INFO`、隔一个周期升 `WARN`、5 秒内连点不升级、`INCR` 4 次 → **+2** `WARN`、`DEL` key → 只打 ERROR 且 diff 行数不变、人工修回后回到 `NONE`；开开关 3 轮各扫 4 个活动全平，关开关 40 秒 0 条对账日志 |
 | B 块故障矩阵 | ⬜ 下一步：D10 五行故障（磁盘排最后）+ 拐点 3 点，靶子用 r1 |
 
@@ -390,7 +391,9 @@ java -jar slot-app/target/slot-app.jar --campusslot.reconcile.enabled=true --cam
 其余：`dept`、`quota_roster`（G-2 名单）、`quota_backfill_queue`（R-6 补位用的表结构——
 **只建了表，没有任何业务写入，当前 0 行**，见 §6 末尾的说明）、
 `notification`（带 `next_retry_at`）、`idempotent_log`（带 `record_id`，支撑 R-3 复现首次结果）、
-`reconcile_diff`、`quota_report`（R-7 每次发放的可归档报表）。
+`reconcile_diff`、`quota_report`（R-7 的可归档报表：**有差异的活动每巡检周期落一份快照**，
+取 `generated_at` 最新的一份；活动关闭后另落一份终版，那份才幂等。
+注意活动目前**没有任何关账动作**——没人把 `PUBLISHED` 置 `CLOSED`，终版报表只能手工触发，详见 §3.5 末节）。
 
 ## 6. MQ 拓扑
 
