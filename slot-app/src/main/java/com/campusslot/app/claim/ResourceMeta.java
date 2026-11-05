@@ -42,13 +42,33 @@ public record ResourceMeta(long id,
     }
 
     /**
+     * 要不要做资格名单校验（P4）= 资源要不要名单。
+     *
+     * <p><b>和 {@link #needCollegeQuota()} 是两个判据，不能合成一个。</b>
+     * 合成过一个版本（{@code rosterRequired && collegeQuotaEnabled}），后果是：
+     * 只配名单、不配学院配额的活动，开关默认是关的，名单一行都不查——
+     * 名单外的人照样抢成功，而且没有任何报错。
+     *
+     * <p>成员判定的方式是「从 {@code quota:roster:{rid}:{sid}} 取到学院编码」，
+     * 所以名单每一行都必须带 {@code college_code}。灌入时跳过空值，
+     * 一整个名单灌完一个 key 都没有，表现就是全场 1005。
+     */
+    public boolean needRosterCheck() {
+        return rosterRequired;
+    }
+
+    /**
      * 学院配额是否生效 = 资源要名单 + 这场发放配了学院行 + 全局开关打开。
      *
-     * <p>三个条件缺一不可。少判「资源要名单」就会出现：没配名单的活动也去查
-     * {@code quota:roster:*}，查不到就判「不在名单内」，整场活动没人能申领。
+     * <p><b>三个条件缺一不可，而且 {@code ReleaseService#resolveCollege} 必须用同一个判据。</b>
+     * 申领没扣、释放却回补，DB 和 Redis 会一起漂；更糟的是往一个从未存在的
+     * {@code quota:college:*} 上 {@code INCR}，每笔释放落一条 -3 假对账。
+     *
+     * <p>少判「资源要名单」就会出现：没配名单的活动也去扣学院余量，
+     * {@code quota:roster:*} 查不到学院编码，整场活动没人能申领。
      * 少判「有没有学院行」则会让「开了开关但没配行」的活动把所有人拒成 1005。
      */
-    public boolean useCollegeQuota() {
+    public boolean needCollegeQuota() {
         return rosterRequired && collegeQuotaEnabled;
     }
 }

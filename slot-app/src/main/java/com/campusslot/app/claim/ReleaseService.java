@@ -203,9 +203,12 @@ public class ReleaseService {
     /**
      * 决定这次释放要不要回补学院余量。
      *
-     * <p><b>判据与申领侧必须完全相同</b>：{@code AsyncClaimService} 只在
-     * {@code meta.useCollegeQuota()} 为真时才查学院编码、才让 {@code claim.lua} 扣学院余量。
+     * <p><b>判据与申领侧扣学院余量那一步必须完全相同</b>：{@code AsyncClaimService} 只在
+     * {@code meta.needCollegeQuota()} 为真时才把学院编码交给 {@code claim.lua}、才扣学院余量。
      * 释放如果不是同一个条件，就会出现「申领没扣、释放却加」——两边一起漂。
+     * 注意申领侧的「名单校验」是另一个判据（{@code needRosterCheck()}），
+     * <b>这里不能跟着换成它</b>：只按名单、不按学院分的活动也开着名单，
+     * 但它的学院 key 从来没被灌过。
      *
      * <p>这个条件里有三项：活动要名单、{@code quota_college} 有行、全局开关
      * {@code campusslot.claim.college-quota-enabled} 打开。少判任何一项都会出问题：
@@ -227,7 +230,7 @@ public class ReleaseService {
      */
     private String resolveCollege(long resourceId, String studentId) {
         ResourceMeta meta = metaCache.get(resourceId);
-        if (meta == null || !meta.useCollegeQuota()) {
+        if (meta == null || !meta.needCollegeQuota()) {
             return null;
         }
         String collegeCode = rosterMapper.selectCollegeCode(resourceId, studentId);

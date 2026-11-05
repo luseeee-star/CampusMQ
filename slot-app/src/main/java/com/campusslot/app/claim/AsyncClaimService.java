@@ -141,19 +141,24 @@ public class AsyncClaimService {
             return ClaimOutcome.fail(ErrorCode.RESOURCE_NOT_OPEN);
         }
 
-        // 学院只在开了配额的活动上才查：默认路径零额外往返。
-        // 查不到该学生 → 不在资格名单内（P4 前置），而不是"没有学院所以不限"。
+        // 资格名单（P4）与学院配额（G-1）是两个判据，不能合成一个：
+        // 只配名单、不配学院配额的活动，也应该拦名单外的人。
+        // 成员判定靠「取得到学院编码」，所以名单每一行都必须带 college_code。
         String college = null;
-        if (meta.useCollegeQuota()) {
+        if (meta.needRosterCheck()) {
             college = readCollege(resourceId, studentId);
             if (college == null || college.isBlank()) {
                 return ClaimOutcome.fail(ErrorCode.NOT_ELIGIBLE);
             }
         }
 
+        // 只有学院配额生效时才把编码交给 lua：传了非空值它就会 DECR 学院 key，
+        // 而没配学院行的活动上那个 key 不存在 → 全被判成 -3「系统繁忙」。
+        String collegeForQuota = meta.needCollegeQuota() ? college : null;
+
         int code;
         int remain;
-        List<String> raw = evalClaim(resourceId, studentId, college, idemTtlMs(meta, nowMs));
+        List<String> raw = evalClaim(resourceId, studentId, collegeForQuota, idemTtlMs(meta, nowMs));
         if (raw == null) {
             return ClaimOutcome.fail(ErrorCode.STOCK_CACHE_MISSING);
         }
@@ -196,7 +201,7 @@ public class AsyncClaimService {
                 resourceId,
                 meta.deptId(),
                 studentId,
-                college,
+                collegeForQuota,
                 nowMs,
                 nowMs + meta.confirmTimeoutSec() * 1000L,
                 ClaimMessage.SOURCE_FCFS);
@@ -208,8 +213,9 @@ public class AsyncClaimService {
                     msgId, resourceId, studentId, remain);
         } catch (Exception e) {
             // 投递失败 = 这次申领没有发生。必须回补，否则学生手里会有一个"抢到了但查不到"的名额。
+            // 回补也必须用 collegeForQuota：lua 只在 useCollege=1 时扣过学院 key，回补口径要一致。
             log.error("MQ 投递失败，回补 Redis resourceId={} studentId={}", resourceId, studentId, e);
-            compensate(resourceId, studentId, college);
+            compensate(resourceId, studentId, collegeForQuota);
             return ClaimOutcome.fail(ErrorCode.MQ_UNAVAILABLE);
         }
 

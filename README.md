@@ -233,7 +233,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy/dev-server.ps1 up `
 ```
 
 再加一个条件：该活动必须在 `quota_college` 里真的有行（seed 里 id=2 那场有）。
-两个条件同时成立才会拦截，见 `ResourceMeta#useCollegeQuota`。
+两个条件同时成立才会拦「学院满」（2002），见 `ResourceMeta#needCollegeQuota`。
+
+**「拦名单外的人」是另一条判据** `ResourceMeta#needRosterCheck`，只看活动要不要名单，
+**不需要开这个开关**。但它靠「从 `quota:roster:{rid}:{sid}` 取到学院编码」来判成员，
+所以名单每一行都必须带 `college_code`——只给学号的名单灌完一个 key 都没有，全场 1005，而且不报错。
 
 ## 4. 环境变量与可调参数
 
