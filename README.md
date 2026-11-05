@@ -35,6 +35,7 @@
 | **判据加固（D8 前置）** | ✅ `oversold` 去 clamp 改带符号；新增 `quotaInvariant`（`remain+issued==totalQuota`），D8 引进取消后不用改 |
 | **落库去重加固** | ✅ 去掉 `INSERT IGNORE`，改 `DuplicateKeyException` 分流；约束错误不再被 ACK 吞掉 |
 | **压测器上限标定** | ✅ 空转端点实测 **4500 req/s**（保守值），D3 的 490 只占其 11%，D5 曲线可信 |
+| **D11 A1 建活动 + 发布** | ✅ `POST /api/admin/resources` + `/publish`：名单与学院配额随建活动写入，发布灌三类 key，重入不覆盖（`stock 9→9`、删 key 后只补缺）；四条拒绝路径实测 1001/1003/2007 |
 | D5 拐点压测 | ⬜ 下一步：单 key 拐点 QPS + P99 曲线（Gatling 从这里开始上） |
 
 ## 2. 目录结构
@@ -45,7 +46,7 @@ campusslot/
 ├── slot-app/                   API 侧唯一进程（8080），功能在包内分层：
 │   └── com.campusslot.app/
 │       ├── gateway/            身份解析 + traceId 落地（Servlet Filter）
-│       ├── resource/           G-1~G-4：活动配置、学院配额、资格名单、对账报表   ← D11
+│       ├── resource/           G-1/G-2 建活动 + 发布（A1 已完成，2026-11-05）；G-3/G-4 待 A2 接上
 │       ├── claim/              S-1~S-5：抢名额、确认、取消、我的记录             ← D2–D8
 │       │   ├── ClaimService            对照组②：Redis 判定 + 同步落库
 │       │   ├── AsyncClaimService       对照组③：Redis 判定 + MQ 投递（D3 起主链路）
@@ -238,6 +239,48 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy/dev-server.ps1 up `
 **「拦名单外的人」是另一条判据** `ResourceMeta#needRosterCheck`，只看活动要不要名单，
 **不需要开这个开关**。但它靠「从 `quota:roster:{rid}:{sid}` 取到学院编码」来判成员，
 所以名单每一行都必须带 `college_code`——只给学号的名单灌完一个 key 都没有，全场 1005，而且不报错。
+
+### 3.5 建活动 + 发布（D11 / A1，2026-11-05 起）
+
+两个接口，管理端用，**目前没有鉴权**（系统里还没有管理端身份体系，写"只能建本部门的活动"只是装饰，
+伪造成本为零；上线前必须先补）。
+
+```bash
+# 1) 建草稿（G-1 命名/名额/窗口 + G-2 名单 + 学院配额一次带进来）
+curl --noproxy '*' -X POST http://127.0.0.1:8080/api/admin/resources \
+  -H 'Content-Type: application/json' -d '{
+    "deptId": 1,
+    "title": "A1 验收·纯名单活动",
+    "totalQuota": 10,
+    "openAt":  "2026-11-06T09:00:00",
+    "closeAt": "2026-11-06T18:00:00",
+    "rosterRequired": true,
+    "roster": [
+      {"studentId": "2024000001", "collegeCode": "CS"},
+      {"studentId": "2024000002", "collegeCode": "EE"}
+    ]
+  }'
+
+# 2) 发布：灌三类 key（余量 / 学院余量 / 名单）→ 迁移状态 → 清元信息缓存
+curl --noproxy '*' -X POST http://127.0.0.1:8080/api/admin/resources/4/publish
+```
+
+**四条必须知道的规则**（都是实测踩出来的，不是风格问题）：
+
+1. **`deptId` 必填且必须是启用部门**。`quota_resource.dept_id` 没有外键，传 99 也能插进去；
+   接口会先 `selectById` 判存在且 `status=1`，不满足回 1001。
+2. **`rosterRequired=true` 时，名单每一行都要带 `collegeCode`**，缺了直接 1001 并指出第几行。
+   灌名单会跳过空编码的行，整份名单灌完 0 个 key、发布照样成功、抢的时候全场 1005。
+   没有单独的"导入名单"接口，所以建的时候不写就没有第二次机会——`rosterRequired=true` 而名单为空同样 1001。
+3. **发布按状态分流**：`DRAFT` 覆盖写（值取数据库的 `remain`，用来校正上一次残留）；
+   `PUBLISHED` 只补缺（`SETNX`，有人在抢，绝不能覆盖）。顺序固定为**先灌 Redis、最后迁状态**，
+   中途失败时活动还停在 `DRAFT`，重跑能走覆盖分支。返回体的 `onlyIfAbsent` 告诉你这次走了哪条。
+4. **库存 key 丢失后补缺，值取 `remain`，可能有偏差**：如果此刻消费端还没追平，
+   `remain` 比真实余量**大**，补进去等于把在途的又放一遍（实测 `pending=-2 / drift=+2`）。
+   接口会打 P0 error 并在 `notes` 里提示：发布完先 `/api/claim/dev/drain`，再看 `stat.drift` 是否为 0。
+
+发布完立刻抢一次不能出现「活动还没开放」——那说明 `ResourceMetaCache.evict` 没生效，
+缓存要等 5 秒才自然过期，演示现场看起来像发布没成功。
 
 ## 4. 环境变量与可调参数
 

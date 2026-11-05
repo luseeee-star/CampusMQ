@@ -5,11 +5,8 @@ import com.campusslot.common.api.R;
 import com.campusslot.common.constant.AppTime;
 import com.campusslot.common.constant.RedisKeys;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.Cursor;
-import org.springframework.data.redis.core.RedisOperations;
 import org.springframework.data.redis.core.ScanOptions;
-import org.springframework.data.redis.core.SessionCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -19,7 +16,6 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,17 +51,20 @@ public class ClaimDevController {
     private final com.campusslot.common.redis.RedisScriptRunner scriptRunner;
     private final com.campusslot.app.notify.MockNotifySender mockNotifySender;
     private final com.campusslot.common.mapper.NotificationMapper notificationMapper;
+    private final com.campusslot.app.resource.QuotaRedisSeeder seeder;
 
     public ClaimDevController(JdbcTemplate jdbc, StringRedisTemplate redis, ResourceMetaCache metaCache,
                               com.campusslot.common.redis.RedisScriptRunner scriptRunner,
                               com.campusslot.app.notify.MockNotifySender mockNotifySender,
-                              com.campusslot.common.mapper.NotificationMapper notificationMapper) {
+                              com.campusslot.common.mapper.NotificationMapper notificationMapper,
+                              com.campusslot.app.resource.QuotaRedisSeeder seeder) {
         this.jdbc = jdbc;
         this.redis = redis;
         this.metaCache = metaCache;
         this.scriptRunner = scriptRunner;
         this.mockNotifySender = mockNotifySender;
         this.notificationMapper = notificationMapper;
+        this.seeder = seeder;
     }
 
     /**
@@ -179,10 +178,10 @@ public class ClaimDevController {
         int reconcileRemoved = jdbc.update("DELETE FROM reconcile_diff WHERE resource_id = ?", resourceId);
 
         redis.opsForValue().set(RedisKeys.stock(resourceId), String.valueOf(total));
-        int collegeKeys = seedCollegeKeys(resourceId);
+        int collegeKeys = seeder.seedColleges(resourceId, false);
         int idemCleared = deleteByPattern(RedisKeys.idem(resourceId, "") + "*");
         int rosterCleared = deleteByPattern(RedisKeys.rosterEntryPrefix(resourceId) + "*");
-        int rosterLoaded = seedRosterEntries(resourceId);
+        int rosterLoaded = seeder.seedRoster(resourceId, false);
 
         // 元信息缓存最后清：前面所有 DB 改动都做完了，下一次读一定拿到新值
         metaCache.evict(resourceId);
@@ -495,54 +494,9 @@ public class ClaimDevController {
         return rows;
     }
 
-    /** 把 quota_college 的 remain 灌进 Redis，返回写入的 key 数。 */
-    private int seedCollegeKeys(long resourceId) {
-        List<Map<String, Object>> rows = jdbc.query(
-                "SELECT college_code, remain FROM quota_college WHERE resource_id = ?",
-                (rs, i) -> Map.<String, Object>of(
-                        "code", rs.getString("college_code"),
-                        "remain", rs.getInt("remain")),
-                resourceId);
-        for (Map<String, Object> row : rows) {
-            redis.opsForValue().set(
-                    RedisKeys.collegeStock(resourceId, (String) row.get("code")),
-                    String.valueOf(row.get("remain")));
-        }
-        return rows.size();
-    }
-
-    /**
-     * 把资格名单灌成「单人一个 key」的学院视图（D4 的学院配额靠它）。
-     *
-     * <p>用 pipeline 而不是逐条 SET：3 万人的名单逐条往返要好几秒，
-     * 而 reset 是每轮压测前都要跑的动作，慢一点都会被嫌。
-     */
-    private int seedRosterEntries(long resourceId) {
-        List<Map.Entry<String, String>> entries = new ArrayList<>();
-        jdbc.query("SELECT student_id, college_code FROM quota_roster WHERE resource_id = ?",
-                rs -> {
-                    String college = rs.getString("college_code");
-                    if (college != null && !college.isBlank()) {
-                        entries.add(Map.entry(rs.getString("student_id"), college));
-                    }
-                },
-                resourceId);
-        if (entries.isEmpty()) {
-            return 0;
-        }
-        redis.executePipelined(new SessionCallback<Object>() {
-            @Override
-            @SuppressWarnings("unchecked")
-            public <K, V> Object execute(RedisOperations<K, V> operations) throws DataAccessException {
-                RedisOperations<String, String> ops = (RedisOperations<String, String>) operations;
-                for (Map.Entry<String, String> e : entries) {
-                    ops.opsForValue().set(RedisKeys.rosterEntry(resourceId, e.getKey()), e.getValue());
-                }
-                return null;
-            }
-        });
-        return entries.size();
-    }
+    // 灌学院配额、灌名单这两段已经搬到 QuotaRedisSeeder：
+    // 发布流程要用同一套（同样的 pipeline、同样跳过空学院编码、同样"覆盖 vs 只补缺"），
+    // 复制一份的代价是两边只会改一边——最典型的表现是"发布之后名单还是旧的"。
 
     /**
      * 按 pattern 数 key 个数（不删）。

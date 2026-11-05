@@ -3212,7 +3212,74 @@ claim_at / expire_at / confirmed_at / released_at / created_at / updated_at
 
 ---
 
+## D11 · A1：建活动 + 发布，以及一个"补缺会把在途的又放一遍"的坑（2026-11-05 下午）
 
+### 做了什么
+
+两个管理端接口（无鉴权，明确取舍）：
+
+```
+POST /api/admin/resources            建草稿：resource + colleges 一个事务，roster 1000 行一批独立提交
+POST /api/admin/resources/{id}/publish  发布：灌三类 key → 迁状态 → evict 元信息缓存
+```
+
+三条实现约束来自计划书，都照做了：
+1. 灌 stock 用数据库 `remain`，不用 `total_quota`（用 total 等于把发出去的加回去）；
+2. 顺序固定为"先灌 Redis、最后迁状态"，中途失败仍停在 DRAFT，重跑能走覆盖分支；
+3. 状态分流：DRAFT 覆盖写、PUBLISHED 只补缺（SETNX）。**判据是当前状态，不是"这次是不是第一次调"**。
+
+### 实测（每个数字都来自真实请求，不是推演）
+
+| 场景 | 结果 |
+|---|---|
+| 纯名单活动，10 人名单、10 名额 | 建 → 发布（stock 10、roster key 10、college key 0）→ 名单内 200/remain 9 → 名单外 1005 → 重放 `X-Claim-Replay: 1` |
+| 带学院配额，总额 4、CS 2 个 | 前 2 人 200（stock 4→2、CS 2→0），第 3/4 人 **2002**；落库后 `quota_college` CS 的 DB 与 Redis 都是 0，`drift 0 / pending 0 / balanced true` |
+| 重复发布（PUBLISHED） | `onlyIfAbsent=true`，stock written 0、roster written 0；**stock 保持 9，没有被 remain 覆盖回 10** |
+| 手工删 3 个 key 后重发 | 只补缺：stock 1、college 1、roster 1，值取 DB |
+| 改小名额 + 状态退回 DRAFT 后重发 | 覆盖写：stock 2 → 1（这就是"上次灌 3000、这次改成 2000"那个洞，堵住了） |
+| 名单被清空后发布 | 1001，拒绝发布，活动仍 DRAFT |
+| CLOSED 状态发布 | 2007 `RESOURCE_STATUS_ILLEGAL` |
+
+### 六条校验，都是"不写就出假状态"
+
+`deptId` 存在且 `status=1`（`dept_id` 没有外键，传 99 也能插）、学院配额非空但没开名单 → 拒绝、
+有名单但 `rosterRequired=false` → 拒绝、学院配额合计 ≤ 总名额、`cancelDeadline` 落在窗口内、
+**字段校验失败必须回 1001**。
+
+最后一条差点漏掉：`@Valid` 失败抛的 `MethodArgumentNotValidException` 会落进 `Exception` 兜底，
+对外表现成 **500「系统繁忙」**——调用方会重试，而重试永远不会成功。时间写成空格分隔
+（`2026-11-10 09:00:00`）也一样，`HttpMessageNotReadableException` 同样需要单独接。
+教训：**参数错误必须是 1xxx。落到 9xxx 的"假故障"比直接报错贵得多**，因为它看起来像系统坏了。
+
+### 新发现的边界：只补缺 + 在途消息 = 多放出 pending 个名额
+
+验收时为了测"只补缺能修好丢失的 key"，手工 `DEL quota:stock:6` 再发布。当时消费端没启动，
+消息全堆在 Broker 里（`records=0 / idemKeys=2`）。发布按 DB `remain` 回填了 **4**，
+消费者起来后两条消息落库、DB 变成 2，于是：
+
+```
+pending = -2   drift = +2   balanced = false
+```
+
+**Redis 比 DB 多出 2 个名额**，也就是把在途的那两笔又放了一遍。原因很直白：
+`remain` 是"DB 视角的余量"，在途消息还没扣 DB，所以它偏大。
+
+处理：照填（不填就是全场 -3，更糟），但打 P0 error 并在返回 `notes` 里写明
+"先 `/drain` 再看 `stat.drift`"。这条**只能靠对账收敛，不能靠接口猜**——它也是 D9 巡检的
+一个天然样本，A3 验收可以拿它造差异。
+
+教训：**"补缺"和"补对"是两件事**。缺 key 时能拿到的最准的值只有 DB 当前值，
+而 DB 当前值在异步链路里天然滞后于 Redis 的预扣——任何"从 DB 回填 Redis"的动作
+都自带这个偏差，区别只在于有没有人知道。
+
+### 一处与计划的偏离（有意）
+
+计划写"复用 `ClaimDevController.seedRosterEntries()`，加一个 `onlyIfAbsent` 参数"。
+实际抽成了 `QuotaRedisSeeder`（`@Component`，恒装配）：那个 controller 只在
+`dev-endpoints=true` 时装配，发布逻辑依赖它等于让发布在关掉 dev 端点后起不来。
+dev reset 改成调 seeder，覆盖写语义不变（`/reset` 仍是全清再灌）。
+
+---
 
 ## v1.0 归档 · D0-D5（2026-10-20，自研存储引擎阶段）
 
