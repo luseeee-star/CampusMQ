@@ -5,10 +5,10 @@ target/
 .kotlin
 
 ### IntelliJ IDEA ###
-.idea/modules.xml
-.idea/jarRepositories.xml
-.idea/compiler.xml
-.idea/libraries/
+# 整目录忽略：encodings.xml / misc.xml / vcs.xml / ApifoxUploaderProjectSetting.xml
+# 都是 IDE 按本机环境生成的（绝对路径、SDK 名、插件设置），换台机器就对不上，
+# 入库只会制造无意义的 diff。2026-11-05 把此前误跟踪的三个文件移出了索引。
+.idea/
 *.iws
 *.iml
 *.ipr
