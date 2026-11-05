@@ -1,0 +1,13 @@
+# A 块验收日志片段（2026-11-05 17:34–17:36，logs/a3-final.log 原始行号）
+# 只保留带 logback 时间戳的行；StdOutImpl 直出的 SQL 行（无时间戳）已剔除，原因见 台账.md「一处日志口径」
+
+196:17:34:34.654 INFO  [72c1b0f99cb246ec81964bcd8c818116] [-] c.c.a.resource.ResourceAdminService - 建活动完成 resourceId=15 deptId=1 total=1 colleges=0 roster=0 rosterRequired=false
+213:17:34:34.775 INFO  [7813c400c3374c8b89e897a3a39115b5] [-] c.c.a.resource.ResourceAdminService - 发布完成 resourceId=15 DRAFT→PUBLISHED(migrated=true) stock=1(written=1) college=0/0 roster=0/0 onlyIfAbsent=false
+536:17:34:48.530 INFO  [] [] c.c.app.reconcile.ReconcileJob - 对账一轮：扫描 3 个活动，差异 0 条，库存 key 缺失 0 个，补终版报表 1 份，失败 0 个
+1186:17:35:17.718 INFO  [575fd40945b743e5b3186607569d1009] [-] c.c.a.resource.ResourceAdminService - 建活动完成 resourceId=16 deptId=1 total=3 colleges=2 roster=4 rosterRequired=true
+1206:17:35:17.814 INFO  [608d97729f984e16b6ea28a41044e768] [-] c.c.a.resource.ResourceAdminService - 建活动完成 resourceId=17 deptId=1 total=2 colleges=0 roster=3 rosterRequired=true
+1296:17:35:21.145 INFO  [80438214fa684529b9e5af3fa7435729] [-] c.c.a.resource.ResourceAdminService - 发布完成 resourceId=16 DRAFT→PUBLISHED(migrated=true) stock=3(written=1) college=2/2 roster=4/4 onlyIfAbsent=false
+1320:17:35:21.227 INFO  [53cf5e0a8e7d423ab7e3f74d96d1934b] [-] c.c.a.resource.ResourceAdminService - 发布完成 resourceId=17 DRAFT→PUBLISHED(migrated=true) stock=2(written=1) college=0/0 roster=3/3 onlyIfAbsent=false
+1526:17:35:29.723 ERROR [e956c951b0814adc8b681df7a57e6538] [-] c.c.a.resource.ResourceAdminService - P0 库存 key 原本缺失，已按数据库 remain=3 回填 resourceId=16；若消费端未追平，在途消息对应的名额会被重复放出
+1527:17:35:29.723 INFO  [e956c951b0814adc8b681df7a57e6538] [-] c.c.a.resource.ResourceAdminService - 发布完成 resourceId=16 PUBLISHED→PUBLISHED(migrated=false) stock=3(written=1) college=1/2 roster=1/4 onlyIfAbsent=true
+1554:17:35:29.952 INFO  [ea826516973c4bc59e07ef1181ff35f6] [-] c.c.a.resource.ResourceAdminService - 发布完成 resourceId=16 PUBLISHED→PUBLISHED(migrated=false) stock=3(written=0) college=0/2 roster=0/4 onlyIfAbsent=true
