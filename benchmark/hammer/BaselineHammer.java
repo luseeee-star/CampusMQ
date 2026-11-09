@@ -553,7 +553,16 @@ public class BaselineHammer {
                 }
             }
             if (resetUrl != null) {
-                post(client, resetUrl);
+                // 探针的复位方法是 GET（PingController: @GetMapping("/ping/reset")），
+                // 一律用 POST 打过去会 405，落到全局兜底变成 9001「系统繁忙」。
+                // 症状很隐蔽：压测照跑、吞吐照出，只是「服务端命中 vs 客户端成功」那一列
+                // 永远对不上（命中数是累加值），脚本还会误报「吞吐被低估」。
+                // /api/claim/dev/reset 与 /api/dev/lua/reset 都是 POST/GET 双收，这里只对 ping 分流。
+                if (resetUrl.contains("/ping/reset")) {
+                    get(client, resetUrl);
+                } else {
+                    post(client, resetUrl);
+                }
             }
             StepStats st = runStep(client, url, idParam, targetId, pingMode, concurrency, windowSec);
             if (countUrl != null) {
@@ -660,7 +669,16 @@ public class BaselineHammer {
                 }
             }
             if (resetUrl != null) {
-                post(client, resetUrl);
+                // 探针的复位方法是 GET（PingController: @GetMapping("/ping/reset")），
+                // 一律用 POST 打过去会 405，落到全局兜底变成 9001「系统繁忙」。
+                // 症状很隐蔽：压测照跑、吞吐照出，只是「服务端命中 vs 客户端成功」那一列
+                // 永远对不上（命中数是累加值），脚本还会误报「吞吐被低估」。
+                // /api/claim/dev/reset 与 /api/dev/lua/reset 都是 POST/GET 双收，这里只对 ping 分流。
+                if (resetUrl.contains("/ping/reset")) {
+                    get(client, resetUrl);
+                } else {
+                    post(client, resetUrl);
+                }
             }
             StepStats st = runOpenStep(client, url, idParam, targetId, pingMode, qps, windowSec, poolSize);
 
