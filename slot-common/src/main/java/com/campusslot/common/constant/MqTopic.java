@@ -8,7 +8,9 @@ package com.campusslot.common.constant;
  *   <li>{@code quota_claimed} —— §4.2 步骤 H 的「异步落库」，同时供通知消费者订阅（不同消费组各自收全量）</li>
  *   <li>{@code quota_release_delay} —— SYS-1「锁定满 30 分钟未确认，到点触发」，用 5.x 任意时间定时消息。
  *       <b>目前只有定义，没有生产发送点也没有业务消费端</b>（2026-11-04），SYS-1 实际靠扫表兜底</li>
- *   <li>{@code quota_backfill} —— R-6「释放的名额进补位队列定向通知」</li>
+ *   <li>{@code quota_backfill} —— R-6「释放的名额进补位队列定向通知」。
+ *       <b>目前只有声明，没有发送点也没有消费端</b>（R-6 未实现，见 README §6）；
+ *       它出现在 producer 的 {@code setTopics} 里只是为了满足 5.x「发之前必须声明」的约束</li>
  * </ul>
  *
  * <p>v2.0 删除了 {@code quota_lottery_entry}（不做抽签）与 {@code quota_reconcile}：
@@ -44,7 +46,11 @@ public final class MqTopic {
     public static final String QUOTA_RELEASE_DELAY = "quota_release_delay";
     public static final int QUOTA_RELEASE_DELAY_QUEUES = 8;
 
-    /** 补位定向通知（R-6），量小，4 个队列足够。 */
+    /**
+     * 补位定向通知（R-6），量小，4 个队列足够。
+     *
+     * <p><b>当前未接线</b>：只有常量声明，没有发送点、没有消费者（R-6 未实现）。
+     */
     public static final String QUOTA_BACKFILL = "quota_backfill";
     public static final int QUOTA_BACKFILL_QUEUES = 4;
 
@@ -57,7 +63,9 @@ public final class MqTopic {
     /** 超时释放。 */
     public static final String CG_RELEASE = "cg_release";
 
-    /** 补位定向通知。 */
+    /**
+     * 补位定向通知。**未接线**：`slot-consumer` 里没有这个消费组的实现（R-6 未实现）。
+     */
     public static final String CG_BACKFILL = "cg_backfill";
 
     /**

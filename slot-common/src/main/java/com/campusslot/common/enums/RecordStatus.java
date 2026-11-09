@@ -14,6 +14,10 @@ package com.campusslot.common.enums;
  *
  * <p>命名用 LOCKED 而不是 PENDING：需求书全文用的是「已锁定」，
  * 代码里叫 PENDING、文档里叫锁定，答辩时每讲一次都要额外解释一遍。
+ *
+ * <p><b>当前无引用（2026-11-09）</b>：业务代码与 SQL 里用的是状态字符串字面量
+ * （`LOCKED` / `CONFIRMED` / `RELEASED`），本枚举没有被任何类引用，**不是状态的唯一来源**。
+ * 保留它的理由是上面那张状态机图——把它删了，状态机就只剩散落的字面量。
  */
 public enum RecordStatus {
 
