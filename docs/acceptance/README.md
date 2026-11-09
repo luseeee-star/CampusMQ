@@ -43,6 +43,7 @@
 | `p1-runA.txt` / `p1-runB.txt` | 每组压测前后的 `Questions` 快照与增量 | 自查 |
 | `b7-aof-restart.md` | 磁盘满后崩溃重启：**能起来、日志无告警**、`dbsize` 少 1 / 9 条、AOF 长度**不变**；附带磁盘满时 SIGTERM 因存最终 RDB 失败而拒绝退出，`docker restart` 拖满 10s 再 SIGKILL | B7 补充 |
 | `b7-aof-truncation.md` | **构造残缺 AOF 正面测 `aof-load-truncated`**：默认 `yes` → 三行 warning + `ftruncate` 133→110 + 正常启动；`--aof-load-truncated no` → `exit 1` 拒绝启动。判定原句成立、但当日两次重启**未触发**截断 | B7 补充 |
+| `b7-shortwrite-repro.md` | **短写与"重启后能写"的定量复现**：`Short write (1657/7483)`、`7483 = 7×1069`，落点在命令中间；重启后 incr 长度不变、`size mod 1069 = 23`、`67,099,015 − 23 = 62,768 × 1069`、尾部 `\r\n`、零 warning → **短写不留残缺文件**；重启后前 2 条写返回 OK、第 3 条起 `MISCONF` → **1–2 条假成功窗口** | B7 补充 |
 
 引用时要带上的前提：
 
@@ -62,6 +63,13 @@
    - `aof-load-truncated` 的作用方向：原句「要靠 `aof-load-truncated yes` 才起得来」**成立**
      （构造残缺 AOF 实测：`yes` 截断后启动、`no` 直接 exit 1），**作废**的是
      「当日那两次重启就是靠它救回来的」——那两次 AOF 长度一字未变、无 warning，尾部完整，没进截断分支。
+5. **短写的机制也改过一次**（`b7-shortwrite-repro.md`）：
+   - 原稿写「588 落在两条命令之间、481 字节从未进入文件」→ **错**。`expected=1069` 就是一条 1KB `SET` 的长度，
+     588 落在**命令中间**；若真如此，加载器必然报 `short read`。
+   - 正确机制：部分写后 Redis 用 `sdsrange` 保留缓冲区剩余、下一次 flush 接着写，
+     **短写只是把一次 write 拆成两次，文件始终完整**。复现证据：`23 + 62,768 × 1069 = 67,099,015`、尾部 `\r\n`。
+   - 原稿写「`SET probe v` 成功是因为刚好塞进剩下 4KB」→ **错**。`availKB` 全程 0；
+     真实原因是重启把 `aof_last_write_status` 复位为 `ok`，返回早于 flush，构成 **1–2 条假成功窗口**。
 5. **P1 的口径是 `reset?quota=1`，不是 `quota=0`**：`ClaimDevController:148` 是
    `quota > 0 ? quota : existing`，传 0 会退回原值（100 万），压 30 秒会写满消费端。
    传 1 时第一个请求成功后全是 2001，**不产生消息**，才能只测 `metaCache`。

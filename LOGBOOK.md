@@ -3814,7 +3814,17 @@ B3 那次是 102–122 条/s，差在积压深度（19 万条 + notification 同
   两次都**正常加载、无告警**，`dbsize` 60,902→60,901、60,843→60,834（丢缓冲区里没落盘的几条），
   AOF 文件长度**一字未变**（没有 ftruncate）。
   注意这次**没有触发截断**——真触发时必然同时出现「文件变短 + `!!! Truncating ... at offset N !!!` +
-  `short read` 警告」，实测三件都没有，说明尾部正好落在命令边界。
+  `short read` 警告」，实测三件都没有。
+- **短写为什么没留下残缺文件**（复现并定量，`logs/b7-shortwrite-repro.md`）：
+  `Short write (1657/7483)` 里 `7483 = 7 × 1069`、`1657 = 1069 + 588`，落点在第 2 条命令中间。
+  部分写后 Redis 用 `sdsrange` 保留 buffer 剩余、下次 flush 接着写，**文件始终是连续完整命令序列**。
+  证据：重启后 incr `67,099,015` 字节一字未变、`size mod 1069 = 23`、
+  `67,099,015 − 23 = 62,768 × 1069`、尾部 `\r\n`、`r2.log` 零 warning、`dbsize` 少 6 条
+  （这 6 条是 kill 瞬间还在 buffer 里的新命令，不是短写丢的）。
+  上一版写"588 落在两条命令之间、481 从未进入文件"是错的——`expected=1069` 就是一条命令的长度。
+- **重启后能写 ≠ 磁盘恢复**：重启把 `aof_last_write_status` 复位为 `ok`，可用仍 0KB，
+  但前两条 1KB 写入返回 `OK`、第 3 条起 `MISCONF`（命令追加到 buffer 就返回、flush 在其后）。
+  所以有 **1–2 条的假成功窗口**：返回 OK 但没落盘，再重启就丢。
 - 所以 `aof-load-truncated` 的作用另做了一次构造实验（`logs/b7-aof-truncation.md`）：
   往尾部塞半条 `SET` 后，默认 `yes` 打三行 warning、`ftruncate` 133→110、然后正常启动；
   设 `no` 则 `exit 1` 拒绝启动并提示 `redis-check-aof --fix`。

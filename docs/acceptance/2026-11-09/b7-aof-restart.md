@@ -36,7 +36,7 @@ docker exec b7b redis-benchmark -n 200000 -d 1024 -r 1000000 -t set -q     # 灌
 docker exec b7b sh -c 'pkill -9 redis-server; sleep 1; redis-server … > /tmp/r2.log 2>&1 &'
 ```
 
-### 结果 A（第一次杀进程）
+### 结果 A（第一次杀进程，有短写日志）
 
 | | 值 |
 |---|---|
@@ -44,8 +44,9 @@ docker exec b7b sh -c 'pkill -9 redis-server; sleep 1; redis-server … > /tmp/r
 | `r1.log` | `# Short write while writing to the AOF file: (nwritten=588, expected=1069)` |
 | 重启后 `dbsize` | **60,901**（少 1 条） |
 | `r2.log` | `DB loaded from incr file appendonly.aof.1.incr.aof: 0.155 seconds`，**无任何 warning/error** |
+| incr AOF 长度 | 这一组**没量**（同一现象后来复现并量全，见 `b7-shortwrite-repro.md`） |
 
-### 结果 B（复跑，带大小测量）
+### 结果 B（复跑，带大小测量；未抓 `r1.log`）
 
 | | 崩溃前 | 重启后 |
 |---|---|---|
@@ -53,6 +54,7 @@ docker exec b7b sh -c 'pkill -9 redis-server; sleep 1; redis-server … > /tmp/r
 | incr AOF 字节 | 67,092,601 | **67,092,601（一字未变）** |
 | `/data` 可用 | 4 KB | 4 KB |
 | 日志 | — | `DB loaded from incr file … 0.159 seconds`，无 truncate 警告 |
+| 短写 | 这一组没抓 `r1.log`，**不能断言没有** | — |
 
 ## 结论（替换掉原来的推测）
 
@@ -69,15 +71,27 @@ docker exec b7b sh -c 'pkill -9 redis-server; sleep 1; redis-server … > /tmp/r
 2. **丢的是 AOF 缓冲区里没落盘的那几条：1 条 / 9 条，不是整段。** 两次都表现为
    `dbsize` 略小于崩溃前，而不是归零。`everysec` 的窗口里最多丢约 1 秒的写入，
    与 B3 的结论（SIGKILL 下已 fsync 的扣减零丢失）方向一致。
-3. **AOF 文件长度不变，没有 ftruncate。** 结果 B 的大小前后完全相同，说明这次崩溃时
-   最后一条命令是**整条没写进去**（缓冲区里），而不是写了一半——所以文件尾恰好落在
-   命令边界上，加载器自然读得下去。结果 A 出现了真正的"短写"（588/1069 字节），
-   但 588 这个偏移恰好也落在两条命令之间：**写失败的 481 字节从未进入文件，
-   文件长度就等于已写成功的偏移**，所以尾部同样是完整的，加载器不报 `short read`。
-   这也解释了「有短写、无警告」这个看起来矛盾的组合。
-   **两种情况都不需要人工修 AOF**——不是因为不需要，而是因为都没触发截断分支。
-4. **重启不算"数据回来了"。** 设备仍然是 100% 满（可用 4KB），`SET probe v` 能成功
-   只是因为这条刚好塞进剩下 4KB；再写就该重新 `MISCONF`。
+3. **短写不产生残缺文件（已复现并定量确认，见 `b7-shortwrite-repro.md`）。**
+   - **结果 A 的 588 落在一条命令中间，不是在两条命令之间。** `expected=1069` 是 `sdslen(aof_buf)`，
+     1069 恰好是一条 1KB `SET` 的长度（`-d 1024`：`*3\r\n`4 + `$3\r\n`4 + `SET\r\n`5 + `$16\r\n`6 +
+     key16 + `\r\n`2 + `$1024\r\n`6 + value1024 + `\r\n`2 = 1069），说明当时 buffer 里只有这一条。
+     上一版写"588 恰好落在边界""481 从未进入文件"是错的——那样加载器必然报 `short read`。
+   - **机制**：部分写之后 `flushAppendOnlyFile` 把已写字节数从缓冲区前部切掉（`sdsrange`），
+     剩余留在 buffer 里，下一次 flush 接着写。所以短写只是把一次 write 拆成两次，
+     **文件始终是连续完整的命令序列**，加载器看不到残缺命令。
+   - **复现数据**：另起一次灌满得到 `Short write (1657/7483)`（`7483 = 7 × 1069`、
+     `1657 = 1069 + 588`，落点同样在命令中间）。杀进程重启后：
+     incr `67,099,015` 字节**一字未变**、`size mod 1069 = 23`、
+     **`67,099,015 − 23 = 62,768 × 1069`**、尾部以 `\r\n` 结尾、`r2.log` **零 warning**、`dbsize` 少 6 条。
+     所以"有短写、无警告、长度不变"不矛盾：文件根本没缺，丢的 6 条是 kill 瞬间还在 buffer 里的新命令。
+   - **结果 B 没有短写记录，但不等于没有短写**：这一组当时没抓 `r1.log`，只能说不确定。
+   **两组都不需要人工修 AOF**——不是因为"不需要"，而是因为文件本来就完整。
+4. **重启后第一次写成功，不能当作「磁盘恢复了」。** 实测（同一补测）：重启把
+   `aof_last_write_status` 复位为 `ok`，`/data` 可用仍为 **0KB**，但第 1、2 条 1KB 写入都返回 `OK`，
+   `aof_write` 到第 2 条之后才变 `err`，**第 3 条起才 `MISCONF`**。
+   原因是命令追加到 `aof_buf` 就返回、flush 发生在其后，状态位只在 flush 失败后才置 `err`。
+   所以磁盘满重启后有 **1–2 条的"假成功"窗口**（返回 OK 但没落盘，再重启就丢）。
+   上一版写"因为这条刚好塞进剩下 4KB"是错的——`availKB` 全程是 0，塞不进去。
 
 ## 附带发现：磁盘满时 `docker stop` 关不掉，会拖满 10 秒宽限期
 
