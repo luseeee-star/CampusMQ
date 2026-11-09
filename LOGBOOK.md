@@ -3713,6 +3713,89 @@ UPDATE quota_resource SET close_at='2026-11-11 16:31:00', cancel_deadline='2026-
 
 ---
 
+## B4–B7 · 四个"预期相反"的实测（2026-11-09 16:14–17:00）
+
+### 1. B4：`docker stop` 那 10 分钟不是操作失误，是 PID1 不转发信号
+
+`cs-broker` 的 PID1 是 `sh mqbroker`（不是 JVM）。`docker stop` 的 SIGTERM 打到 `sh` 上，
+**shell 不转发**，10 秒宽限后 SIGKILL，下次启动走异常恢复（重建 ConsumeQueue）——这就是 11-05 的 10 分钟。
+
+`mqshutdown` 脚本只做一件事：`ps ax | grep BrokerStartup | awk '{print $1}'` 然后 `kill` 那个 **java PID**。
+实测（100 并发压 60 秒，T+4s 发 SIGTERM）：
+
+| 事件 | 时刻 |
+|---|---|
+| SIGTERM | 16:14:39 |
+| 容器退出（restart policy 自动拉起，不需要 `docker start`） | +5s |
+| `clusterList` 重新出现 `broker-a` | 16:15:46 |
+
+**67 秒**（第一次试跑 76 秒）。对照 11-05 的 10 分钟，结论是"强杀导致重建"成立。
+
+### 2. B4 的数字和预测相反：没有 3 秒阻塞
+
+60 秒窗口 149,793 个请求：成功 33,158（22%，集中在前 4 秒）、`9003` 116,635（78%）、
+平均吞吐 2,495 req/s、p50 33ms / p95 49ms / **p99 471ms**。
+
+`setRequestTimeout(3000)` 只在"连接还在、对端不回包"时生效。broker 进程一死，TCP 被 RST，
+`send()` **立刻抛错**（~40ms）。所以停机的代价是 **78% 的请求被拒**，不是吞吐塌陷、不是线程被占满；
+2,495 反而高于 B1 同并发那一档的 2,342（9003 分支少一次投递）。
+
+「异步化把 MQ 变成了同步依赖点」仍然成立，但**失效形态是快速失败**。
+3 秒超时要等 broker 卡住没死（GC 停顿 / 网络丢包 / 磁盘 hang）才看得到——那是 B5/B7 的边界。
+
+回补是对的：`redis 已消耗 33,158 = ok 33,158`，失败请求一份配额没留；`records + pending` 也精确等于成功数。
+
+### 3. B5：`pending` 峰值精确等于成功数，但追平速率不是常数
+
+停消费端、100 并发压 60 秒、配额封顶 3 万：`pending 30,000 / records 0 / drift −30,000`。
+拉起消费端后 **116 秒追平 30,000 条（258 条/s）**，曲线单调，没有"恢复瞬间归零"（那是消息被位点跳过的信号）。
+
+B3 那次是 102–122 条/s，差在积压深度（19 万条 + notification 同时在写，同一行 `remain` 争用更深）。
+**引用消费速率必须带上积压量**，否则两个数看着像矛盾。
+
+停消费端期间 `stat` 必然是 `balanced=false`（`idemKeys > records`）——预期形态，不是故障。
+
+### 4. B6：入口的 DB 依赖是 37 次/s，不是 0.4 次/s
+
+停消费端后单量 `SHOW GLOBAL STATUS LIKE 'Questions'`（不关它，消费端的 INSERT/UPDATE 会把读数淹掉）。
+
+- 空转 30 秒基线 **100 次（3.33 次/s）**——比"2 次/s"的预估高，说明 sweeper 每轮不止一条查询。
+- 压 61 秒：`2410 − 203 ≈ 2207`，**≈ 37 次/s**。对 2,500 req/s 的入口 = **1.5% 的请求回源**。
+- 1 秒粒度（`logs/b6-pulse.txt`）：`7 103 10 212 10 7 213 9 9 212 …`，脉冲期单秒 **212–213 次**。
+- `loadFromDb` 是 2 条 SQL（`selectById` + `countByResource`）→ 一次脉冲 ≈ **106 个请求同时回源**。
+
+**惊群规模不能按"回源耗时 × QPS"去推。** 按 1–2ms 窗口算出来是 7–14，实测 106，差一个数量级——
+因为 106 个 SELECT 排在 64 个连接前面，回源窗口被自己拖长，窗口越长吸进的请求越多（正反馈）。
+
+同时这条也证明 **B1 的曲线没被惊群污染**：只占 1.5%，不改变量级。
+
+### 5. B7：磁盘满时 Redis 拒写，所以余量不会虚高
+
+生产那套不能打（容器 `/data` 1007G、宿主 C 盘只余 81G，按 95% 要写 899GB，先炸的是 Windows）。
+用一次性容器：`--tmpfs /data:size=64m` + `appendonly yes`，灌 1KB × 20 万。
+
+- 写命令 → `MISCONF Errors writing to the AOF file: No space left on device`，`SET`/`INCR` **都拒**；
+- 读正常、`dbsize` 60,814 保留；`aof_last_write_status: err`、`rdb_last_bgsave_status: ok`；
+- **AOF incr 文件 67,086,187 字节 > tmpfs 64MB** —— 最后一段写失败时文件已被扩到全长、数据没落盘；
+  这正是崩溃后要靠 `aof-load-truncated yes` 才起得来的形态。
+
+所以磁盘满的风险是**可用性**（扣减失败 → EVAL 抛错 → 9001，全场申领失败），不是**正确性**（超发）。
+
+**单机不可安全验证"宿主机磁盘满 → MySQL 一起不可用"**（vhdx 共用一块盘，真打满连删文件的命令都进不去）。
+这条按"未验证"写进报告，而不是按"测过没事"写。
+
+### 6. 一个反复踩的坑：Git Bash 会把 `/` 开头的参数改成 Windows 路径
+
+一晚上踩了三次，都是同一个机制：`/api/claim/mq` → `D:/WorkBuddy/.../api/claim/mq`（压测器把 URL 拼坏，
+104,069,080 个请求全是 `IllegalArgumentException`）；`--tmpfs /data:size=64m` → 容器起不来；
+`docker exec b7-redis df -h /data` → `can't find mount point`。
+
+**凡是要把 `/xxx` 原样交给 docker / java 的命令，前面加 `MSYS_NO_PATHCONV=1`，或者改用 PowerShell。**
+第一次那 60 秒的 B4 数据因此作废重跑——代价是 5 分钟，但如果不核对 `target` 那一行，
+会把"104,069,080 req/s 峰值"写进报告。
+
+---
+
 ## v1.0 归档 · D0-D5（2026-10-20，自研存储引擎阶段）
 
 > 方案已废弃，记录保留。

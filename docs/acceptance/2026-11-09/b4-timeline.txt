@@ -1,0 +1,6 @@
+T0 16:14:31
+T+4s 16:14:38
+The mqbroker(24) is running...
+Send shutdown request to mqbroker(24) OK
+sigterm 16:14:39
+broker-a 16:15:46
