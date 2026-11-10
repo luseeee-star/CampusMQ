@@ -30,9 +30,12 @@ spring:
       pool:
         # 默认 1 个线程：SYS-1 的扫表一旦卡在追平上，SYS-2 的通知重试就全部延后，
         # 表现为"通知忽然晚了几十秒"，而根因是另一个任务抢了线程。
-        # 2 个线程让「释放扫描」和「通知重试」各占一条，互不排队。
+        # 现在有三个常驻任务：释放扫表（500ms）、通知重试（1s）、到点关闭（5s）。
+        # 3 个线程让它们各占一条，互不排队。到点关闭虽然周期长，但它要写报表
+        # （统计几万条 quota_record），单轮可能跑到秒级——放在 2 线程池里会挤掉释放扫表，
+        # 而 NFR-5 恰恰看释放的延迟。
         # 不要开到 8：每个任务都是固定频率的 DB/Redis 负载，线程数不会让它更快，只会让并发更高。
-        size: 2
+        size: 3
   data:
     redis:
       host: ${REDIS_HOST:127.0.0.1}
@@ -110,9 +113,21 @@ campusslot:
     # D3：资源元信息缓存。链路上最后一次 DB 往返靠它搬走。
     # 不要为了"更省"调到分钟级：运营把活动下架后，学生最长还能抢这么久。
     meta-cache-ttl-ms: ${META_CACHE_TTL_MS:5000}
+    # single-flight：5 秒 TTL 是全局对齐的，失效瞬间所有在途请求同时 miss。
+    # 跟随者最多等领导者这么久，超时就自己回源（宁可多查一次，不让请求排队）。
+    meta-single-flight-wait-ms: ${META_SINGLE_FLIGHT_WAIT_MS:100}
     # G-1 学院配额的总开关。D12 决策点：关掉后 quota_college 的行只用于报表，不拦截。
     # 还需要该活动真的配了学院行才会生效（见 ResourceMetaCache#loadFromDb）。
     college-quota-enabled: ${COLLEGE_QUOTA_ENABLED:false}
+  resource:
+    # S-3 到点自动关闭：close_at 一到就把 PUBLISHED 改成 CLOSED，并补一份终版报表。
+    # 在这个任务之前，CLOSED 全项目没有任何写入路径 —— 活动到点后申领会被时间判据拒掉，
+    # 但状态永远停在 PUBLISHED、quota_report 永远不出现（R-7 的报表只能人肉触发）。
+    # 默认开：它是"证据自己长出来"的前提，关掉就等于关掉归档。
+    close-scan-enabled: ${RESOURCE_CLOSE_SCAN_ENABLED:true}
+    # 5 秒而不是 500ms：申领的关闭与否由 close_at 判定，不依赖这个状态翻转，
+    # 所以这里只影响"报表什么时候出现"。别为了看得快调到 200ms —— 那要写报表，是秒级操作。
+    close-scan-interval-ms: ${RESOURCE_CLOSE_SCAN_INTERVAL_MS:5000}
   reconcile:
     # SYS-3 巡检总开关。**默认关**，生命周期是「验收时开、验完关、B 块结束再开」。
     # 默认关的理由是代价不对称：忘了开只是暂时没巡检；忘了关会每 5 分钟扫全部活动、
