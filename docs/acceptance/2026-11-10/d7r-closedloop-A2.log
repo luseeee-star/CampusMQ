@@ -1,0 +1,14 @@
+
+=== sweep · group 3: redis + mq async persist ===
+target   http://127.0.0.1:8080/api/claim/mq
+window   30s per step, closed loop (no think time)
+steps    800
+hit      (未提供 --count，跳过服务端命中数校验)
+
+conc,thr,p50,p95,p99,avg,ok,full,other,err,limited,fail%,failAll%,hit,inflightAvg,inflightPeak,idem
+#step 0 conc=800 toggle=-
+800,8771,82,101,128,89,263828,0,0,0,0,0.00,0.00,-,798,800,0
+
+peak  8771 req/s @ concurrency 800
+note  只有一档，判不了拐点
+
