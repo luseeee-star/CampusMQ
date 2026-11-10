@@ -1,0 +1,30 @@
+# Q4 旁路容器裸 EVAL —— 2026-11-10 13:54:19
+# 镜像 redis:7.2 / appendonly yes / maxmemory 1gb noeviction / 脚本 e45b1a42363fd75c151bde2ef09cb7ecf5d730f6
+# 单 key quota:stock:9001 预置 20,000,000，idem 键用 __rand_int__ 打散（实测 5001 个键/5000 请求）
+
+redis_version:7.2.17
+process_id:1
+config_file:
+
+## 并发 400
+100.000% <= 14.103 milliseconds (cumulative count 300000)
+Summary:
+  throughput summary: 83635.35 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        4.069     1.560     3.919     6.207     7.543    13.167
+
+## 并发 800
+100.000% <= 31.103 milliseconds (cumulative count 300000)
+Summary:
+  throughput summary: 77700.08 requests per second
+  latency summary (msec):
+          avg       min       p50       p95       p99       max
+        8.965     3.472     8.471    13.879    17.327    30.623
+
+## commandstats（evalsha）
+cmdstat_evalsha:calls=605001,usec=2806058,usec_per_call=4.64,rejected_calls=0,failed_calls=0
+cmdstat_decr:calls=603140,usec=150572,usec_per_call=0.25,rejected_calls=0,failed_calls=0
+cmdstat_set:calls=603141,usec=487040,usec_per_call=0.81,rejected_calls=0,failed_calls=0
+cmdstat_get:calls=605001,usec=162943,usec_per_call=0.27,rejected_calls=0,failed_calls=0
+cmdstat_exists:calls=605001,usec=266642,usec_per_call=0.44,rejected_calls=0,failed_calls=0
