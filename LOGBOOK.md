@@ -4037,6 +4037,7 @@ the same size as the effect」），所以补了反序第二轮 B2→A2。
   `pending = +2`——DB 回补了、Redis 少回补。方向是 Redis 偏小（少发、早关闸，fail-closed 一侧）。
   四臂排空尾部还各出现过 `0 / −1 / −2 / −1` 的分歧，同一来源，**没定位到是哪一次 `release.lua` 少回**。
   收尾时按账本把 Redis 补到 `dbRemain` 再复位，**这是手工改数，记在这里**。
+  当晚补做了只读代码归因，结论与取证顺序见下章「四、`release.lua` 的 ≤2」。
 
 ### 7. 复位口径
 
@@ -4044,3 +4045,130 @@ the same size as the effect」），所以补了反序第二轮 B2→A2。
 `deletedRecords 263,828`、`clearedIdemKeys 263,828`、`pendingBeforeReset 0` → `1,000,000 / 1,000,000 / 0 条`。
 **`open_at` 也一并被 `reset` 重写**（11-09 的备份里它就是 dump 当时的时间）——所以 r1 的"原始窗口"
 这个概念本身不成立，能保的只有 `close_at` 这个人为硬截止，已改回 **2026-11-11 16:31**。
+
+---
+
+## 2026-11-10 夜 · 一天版改码：三项加固落地、一项把"未定位"改成"可判"
+
+一天版把「每晚一项、慢慢验」压成「一夜改完、明天一个窗口全验」。今晚只改码、不跑压测，
+每项改完立刻 smoke（`benchmark/night-smoke.ps1`，一次 app 生命周期内跑完 12 条判据）。
+**终态：12 条全绿**，两轮 smoke 都验了 r1 / r3 前后一字不差。
+
+### 一、`studentId` 长度校验：代码 10-27 就在，今晚只补了实测
+
+这条不是"待开发"而是"待验证"——`StudentIdRule`（`MAX_LENGTH = 32`，与 `student_id VARCHAR(32)` 对齐）
+已经在五处入口生效：`ClaimService:102`、`AsyncClaimService:127`、`ConfirmService:67`、
+`ReleaseService:132`、名单导入 `ResourceAdminService:257`。两条申领链路共用同一个类，
+不存在"同步链路挡了、异步链路没挡"的分叉。
+
+实测（61 字符学号打 `/api/claim/mq`）：
+
+| 判据 | 实测 |
+|---|---|
+| 返回码 | `1001`（不是 9001、不是 2006） |
+| `quota:stock:{id}` | 仍为 `5`，一次 `DECR` 都没有 |
+| `quota_resource.remain` | 仍为 `5` |
+| `quota_record` | `0` 行 |
+| `pending` | `0` —— 没有消息被投出去 |
+
+**这一步真正的价值是"顺带确认了 9001 的语义"**：第一次跑成 9001，原因是脚本用 GET 打了
+`/api/claim/mq`（POST-only），`HttpRequestMethodNotSupportedException` 被全局处理器收成 9001。
+也就是说 **9001 里混着"路径/方法写错"和"系统真忙"两类**，看这个码不能直接下"服务端有问题"的结论。
+
+### 二、`metaCache` single-flight：把 5 秒一次的对齐脉冲削掉
+
+**问题不是"每 5 秒一次主键查询"，是"每 5 秒几百个线程同时查一次"**。同一个活动只有一个
+`quota:res:{id}` key，TTL 到期后所有在途请求同时变 miss；一次 miss 是两条 SQL
+（`selectById` + `countByResource`）。8000 QPS 下这会在 `Questions` 曲线上长出一个 5 秒周期的脉冲——
+压测时很容易被读成"业务负载有周期性"，实际上是缓存自己造的负载，而且它正好落在
+64 连接池最紧的时刻。
+
+实现（`ResourceMetaCache`）：`ConcurrentHashMap<resourceId, CompletableFuture<ResourceMeta>>`
+决定谁回源，leader 查 DB 并写缓存，follower 等它的结果（上限 100ms）。
+**跟随者等不到就自己回源**，不排队——single-flight 的目的是削重复查询，不是把可用性绑在 leader 上。
+不缓存 `null`：资源是会被创建出来的，缓存 1003 等于"刚建好就有 5 秒说不存在"。
+计数 `campusslot.claim.meta_cache{result=hit|miss_leader|miss_follower|follower_fallback}`。
+
+实测（5 轮 × 200 并发，每轮先 `DEL` 元信息 key 制造冷 miss）：
+
+| 项 | 值 | 判读 |
+|---|---|---|
+| `miss_leader` | **5** | 每轮恰好 1 次回源；没有合并的话这里会是几十到几百 |
+| `miss_follower` | 221 | 被合并掉的并发 miss |
+| `follower_fallback` | **0** | leader 一次都没卡住 |
+| `hit` | 774 | 5 + 221 + 774 = 1000，账是齐的 |
+
+### 三、`CLOSED` 原来没有任何写入方（这是真 bug，不是加固）
+
+改之前整个仓库只有**读** `CLOSED` 的地方：`ReconcileJob:76/132` 拿它决定"给已关闭活动补终版报表"，
+`ResourceAdminService:339` 拿它挡"重新发布"。**没有任何一处把状态写成 `CLOSED`**。
+所以 `close_at` 一到：申领确实被 `ResourceMeta.isOpen()` 按时间拒掉（这一半是对的），
+但活动永远停在 `PUBLISHED`，`quota_report` 永远不出现 —— R-7 的"每次发放留一份可归档报表"
+只能靠人手工触发，而那正是归档证据最不该依赖的东西。
+
+新增 `ResourceCloseJob`（+ `campusslot.resource.close-scan-*`）：
+
+1. 每 5 秒扫 `PUBLISHED AND close_at <= now`；
+2. 条件 `UPDATE ... WHERE status='PUBLISHED' AND close_at <= now`，`rows = 1` 才算自己关成功
+   （多实例安全靠这一句，不靠"只有一个实例在跑"）；
+3. 关成功后 `ReconcileService.writeFinalReport`（自己幂等，有报表就跳过）；
+4. 再补一轮"`CLOSED` 但无报表"的兜底 —— 改状态与写报表**不在同一个事务**
+   （报表要统计几万条 `quota_record`），中间被杀就会留下一半。
+
+两个刻意的取法：`UPDATE` 里**再判一次** `close_at <= now`（否则运营把活动延期的那次操作会被
+覆盖成"已关闭"）；`now` 用 `AppTime.now()` 而不是 `NOW()`（`NOW()` 取服务器时区，UTC 容器下整体偏 8 小时）。
+调度池 2 → 3：新任务要写报表（秒级），挤在 2 线程池里会把释放扫描往后推，而 NFR-5 恰恰看那个延迟。
+
+实测（活动 `close_at = +15s`，**全程零手工触发**）：
+
+| 判据 | 实测 |
+|---|---|
+| `status` | `CLOSED` |
+| `quota_report` | `2/0/0/0/2/1`（total/granted/released/locked/remain/balanced），`balanced = 1` |
+| `generated_at − close_at` | **4 秒** —— 报表是"到点之后自己长出来"的，不是人工补的 |
+
+**明天 r3(15:19) / r1(16:31) 的自动验证只能看 DB，不要去找日志行**：`application-bench.yml`
+把 `com.campusslot` 钉在 `WARN`，而关活动的记录是 `INFO`，bench profile 下根本不会进 `app.log`。
+判据是 `status = 'CLOSED'` + `TIMESTAMPDIFF(SECOND, close_at, generated_at) ∈ [0, 10]`。
+
+### 四、`release.lua` 的 ≤2：不是行级 bug，是四个"DB 已 +1、Redis 未 +1"的窗口
+
+按"DB↑ 与 Redis↑ 唯一可能不同步的地方"穷举（`ReleaseService` 里整个释放过程只有一条路径，
+所以这个枚举是封闭的）：
+
+| 窗口 | 触发条件 | 现存痕迹 |
+|---|---|---|
+| **P1** | 事务已提交，`scriptRunner.eval` 抛异常（Redis 超时/不可达） | `reconcile_diff` 一行 `REDIS_UNAVAILABLE` + 一条 ERROR |
+| **P2** | Lua 返回 −1/−2/−3/−4（key 丢了、到了上界、学院 key 丢了、KEYS 别名） | `reconcile_diff` 一行 `REDIS_AT_TOTAL` 等 |
+| **P3** | 事务提交后、Lua 执行前进程被杀 | **无任何痕迹** |
+| **P4** | `saveDiff` 自己写不进去 | ERROR（行丢了） |
+
+四者的方向全是"Redis 偏小"，与观测到的 `744,103 / 744,101` 一致。**代码层面没有第五个出口**：
+`afterCommit` 是无条件调用 Lua 的，没有"跳过回补"的分支。
+
+**之所以"没定位到"，一半是取证顺序造成的**：`ClaimDevController:178` 的 reset 会
+`DELETE FROM reconcile_diff WHERE resource_id = ?`。收尾那天先按账本把 Redis 补正、再 reset ——
+P1/P2 留下的证据就在这一步被删掉了，事后再查表只能看到空的。
+
+**不硬修**，理由和 `ReleaseService` 头注释一致：任何自动补都要么 `INCR`/`DECR` 重试
+（非幂等，会把"少发"变成"超发"），要么用一个不可信的值去修正一个已提交的事实。
+**改的是取证协议**：下一轮在 reset **之前** dump
+
+```sql
+SELECT fix_action, COUNT(*) FROM reconcile_diff WHERE resource_id = ? GROUP BY fix_action;
+```
+
+- 出现 `REDIS_UNAVAILABLE` → 落在 **P1**（Lua 超时），数量应等于该轮的 Redis 超时次数；
+- 出现 `REDIS_AT_TOTAL` / `STOCK_KEY_MISSING` → 落在 **P2**；
+- 两者都没有、而 `pending` 仍差 ≤2 → 只剩 **P3**，可直接用"该轮进程重启次数"解释量级。
+
+这样"未定位"就变成了一个**下次跑一轮就能判**的问题，而不是一笔挂账。
+
+### 五、今晚留下的状态
+
+- 新建 6 个测试活动（id 18/19/20 与 21/22/23，title 以 `night smoke` 开头），`close_at` 都在
+  11-11 20:41–21:05，到点后会被新任务自己关掉并出报表 —— 与 r3/r1 的时间点不冲突。
+- 两轮 smoke 前后都核过：`r1 = 1000000/1000000/PUBLISHED`、`r3 = 3000/2996/PUBLISHED`，**一字未动**；
+  `r1.close_at` 仍是 `2026-11-11 16:31`，明天两个自动验证点的前提还在。
+- 明天待办（不做就写进"不做并列明"）：文档同步（README §10 状态表要加"到点关闭已上线"、
+  砍掉清单四条）、限流两臂 3000/6000 重标定、6000 档排空、**16:00 压测硬截止**。
