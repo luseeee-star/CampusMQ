@@ -15,7 +15,7 @@
 |---|---|---|
 | `q4-bare-redis.md` | **先看这个**：为什么必须旁路、设置、`__rand_int__` 的验证、三分支判定 | Q4 |
 | `q4-redis-raw.txt` | 旁路容器的原始输出：400/800 两档吞吐与延迟分位、`INFO commandstats` | Q4 |
-| `q7-steady-openloop.md` | **先看这个**：为什么不能只重跑 D5、两臂结果、三条候选的裁定、NFR-6 新口径、对账与收尾 | Q7 / Q19 |
+| `q7-steady-openloop.md` | **先看这个**：为什么不能只重跑 D5、两臂结果、三条候选的裁定、NFR-6 新口径、对账与收尾；**§十 数清 `rej` 分层**（9,106 全在客户端、服务端零拒绝）、**§十·补 两臂吞吐差 = `rej` 差 ÷ 60** | Q7 / Q19 |
 | `q7-steady-arms.csv` | 两臂汇总（18 列 + `drainSec`），**这一行就是全部结论的来源** | Q7 |
 | `q7-steady-samples.csv` | 压测期间每 5 秒的 `pending` / `records` / 双端余量 | 过程形状 |
 | `q7-steady-T1.log` / `T2.log` | `BaselineHammer` 原始输出（含 `reset`/`drain` 之外的全部行） | 复核 |
