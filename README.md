@@ -380,9 +380,12 @@ java -jar slot-app/target/slot-app.jar --campusslot.reconcile.enabled=true --cam
 （r1、r3）整份记录都 join 不上名单，手工插的记录也 join 不上。三份来源取**并集**、`null` 单独成一桶排在最后、
 **参与合计**。让 `GROUP BY` 吃掉它，各学院加起来就会比总数少，看起来像丢了几条记录。
 
-#### 手工关账（当前唯一路径，2026-11-05 补记）
+#### 手工关账（运维兜底，2026-11-05 补记 · 11-11 改）
 
-**活动没有关账 job，也没有关闭接口**——`PUBLISHED → CLOSED` 没有任何代码路径（全仓四处 `CLOSED` 都在判定、枚举、注释里）。
+**自动关账由 `ResourceCloseJob` 负责**（见 §10.1）：`close_at` 到点后 5 秒内扫到，条件 `UPDATE` 把
+`PUBLISHED` 置 `CLOSED`，再落一份终版报表；实测 gap 1–3 秒、零手工触发。
+本节的三步 SQL 是**运维兜底**：`campusslot.resource.close.enabled=false` 时、或需要立刻归档不等扫描周期时用。
+
 学生侧的关闭本来就不靠它：`ResourceMeta.isOpen()` 在 `close_at` 一过就返回 false。所以关账不是安全开关，它只做三件事：
 让终版报表自动归档、挡住误重发布、让"已结束"在库里可见。
 
@@ -408,12 +411,11 @@ FROM quota_report WHERE resource_id = <id>;
 **对外只能用"关账后 ≤1 个巡检周期（默认 5 分钟）出终版报表"**，不要引用验收记录里的 10 秒——那是把
 `--campusslot.reconcile.interval-ms` 压到 10000 的测试值，不是生产值。
 
-自动化版本排到**交付收口之后**（B 块期间不引入重启 + 回归；11-11 硬截止前也不动），规格已定：`CloseJob` + `campusslot.close.enabled` **默认 false**
-（和巡检同一种开关形式）；宽限期 60 分钟（`close_at` 之后不再产生 LOCKED，最后一批在 `close_at + CONFIRM_TIMEOUT` 被
-sweeper 释放，留一倍裕度）；逐条 `WHERE status='PUBLISHED' AND close_at < NOW() - INTERVAL 60 MINUTE` 条件更新，
-0 行 = 已被人工或并发关掉，跳过不报错；关闭后直接复用 `writeFinalReport`，让"关账 → 报表"只有一条实现；
-**全程不碰 Redis**。也没有"基线三活动白名单"——r1/r2/r3 的 `close_at` 在 11-11/11-12，B 块窗口（11-09）内条件根本关不到它们，
-时间本身就是保护，白名单反而会漏掉新造的测试活动、之后变成技术债。
+**自动化版本已交付（11-10）**，与当初定的规格有三处差别：扫描周期 5 秒（不是"一个巡检周期"）、
+开关 `campusslot.resource.close.enabled` 默认 false、**不设宽限期**——`ResourceMeta.isOpen()`
+已保证 `close_at` 一过就拒绝申领，关账只是归档触发器，早关晚关不影响正确性。
+条件更新 `WHERE status='PUBLISHED' AND close_at < NOW()`，0 行 = 已被并发关掉，跳过不报错。
+**全程不碰 Redis**。也没有"基线三活动白名单"——不需要了。
 
 ## 4. 环境变量与可调参数
 
@@ -448,8 +450,8 @@ sweeper 释放，留一倍裕度）；逐条 `WHERE status='PUBLISHED' AND close
 `notification`（带 `next_retry_at`）、`idempotent_log`（带 `record_id`，支撑 R-3 复现首次结果）、
 `reconcile_diff`、`quota_report`（R-7 的可归档报表：**有差异的活动每巡检周期落一份快照**，
 取 `generated_at` 最新的一份；活动关闭后另落一份终版，那份才幂等。
-注意活动目前**没有任何关账动作**——没有任何代码路径把 `PUBLISHED` 置 `CLOSED`，终版报表只能靠手工关账触发，
-三步 SQL 与判据见 §3.5 末的「手工关账」；关账 job 排在 B 块之后，规格也在那一节。
+终版报表由 `ResourceCloseJob` 触发（§10.1）：`close_at` 到点后 1–3 秒内落 `CLOSED` 并写一份报表。
+手工三步 SQL 是运维兜底，见 §3.5 末的「手工关账」。
 
 ## 6. MQ 拓扑
 
