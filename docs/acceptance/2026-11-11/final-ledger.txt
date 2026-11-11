@@ -3,3 +3,45 @@
 {"code":0,"message":"ok","data":{"resourceId":24,"totalQuota":2000000,"dbRemain":1385039,"redisRemain":1385059,"drift":20,"records":649503,"issued":614961,"dbConsumed":614961,"redisConsumed":614941,"pending":-20,"oversold":-1385039,"overflow":false,"recordsOverQuota":false,"quotaInvariant":true,"invariantDelta":0,"issuedLeRecords":true,"idemKeys":649503,"idemMatch":true,"balanced":false},"success":true}
 # reconcile_diff（取证协议：reset 会 DELETE 本表，先 dump）
 (空=无 P1/P2 痕迹)
+
+# ---- 取证缺口结论（2026-11-11 17:20 补，reset 之后回溯） ----
+#
+# 问题：15:57:06 账面 pending=-20（守卫应拦），reset 却成功执行（deletedReconcileDiffs=11）。
+# 三种可能：① 传了 force ② pending 真的归零 ③ 守卫读到 null。
+#
+# 【已证实，可回溯】
+# 1. mysqldump（15:57，reset 之前）里 reconcile_diff 无任何 INSERT 行
+#    → 15:57 那次 GROUP BY 查询返回空是【真的】，不是查询失败。
+#    更正 11-10 记录的第二种可能（"查询本身没查到"）：查询是对的。
+# 2. ReconcileService 只读 Redis（仅 opsForValue().get），头注释明写 fixed_at 留空由人确认
+#    → 对账【不会】修平 drift。"ReconcileJob 在 15:57 后自愈 drift 20"不成立。
+# 3. logs/archive/app-1111-155901.log 有 11 条同源 WARN，全部落在 15:57:23.163-23.590：
+#      ReleaseService - 释放成功但 DB 侧已在配额上界 reason=TIMEOUT action=DB_AT_TOTAL
+#      dbRemain=2000000 totalQuota=2000000 redisRemain=1385719..1385728（递增）
+#    这是 reset 的 "UPDATE remain=total" 之后、"SET quota:stock" 之前的窗口：
+#    ExpiredReleaseSweeper 的 TIMEOUT 释放撞上 DB 已满 → DB 不回补、Redis 照常 INCR。
+#    11 条与 deletedReconcileDiffs=11 数值相同，但两者来源不同（ReleaseService vs ReconcileService），
+#    是否同一批【无法判定】。
+#    ★ 这条是 drift 方向反转（+20，Redis 偏大）的【首个机制级证据】：
+#      不是"少扣 20"，是 DB_AT_TOTAL 单边回补 — 方向 fail-open，与 11-10 的"永远偏小"相反。
+#
+# 【不可回溯】
+# 4. pending 从 -20 归 0 的路径：reset 的返回值没完整落盘（pendingBeforeReset 字段未保存），
+#    日志里 com.campusslot 被 bench profile 钉在 WARN 而 reset 无 WARN，
+#    守卫为何放行无法复现。三种可能都无法排除。
+#
+# 【结论】不可回溯 + 协议修正（下方三条）。不猜、不留白。
+#
+# 【协议修正（下轮必须照做）】
+# R1. reset 的【完整 JSON 返回值】必须落盘（含 pendingBeforeReset / deletedReconcileDiffs）。
+#     这是唯一能回答"守卫为什么放行"的字段，而它只存在于响应体里。
+# R2. stat 与 dump 必须【同一秒】。本轮 stat 15:57:06、dump 15:57:xx、reset 15:57:23，
+#     17 秒的缝里恰好跨过了 reset 的关键窗口 —— 两次取证夹不住一次变更就等于没取证。
+# R3. 取证顺序改为 stat → dump → 【再 stat】→ reset。两次 stat 夹住 dump，
+#     才能证明"dump 前后的账面没变"，否则 dump 只是"某一刻看起来是这样"。
+#
+# 【同时发现一个代码缺口，记入待办，本轮不改】
+# ClaimDevController:142 守卫是 pendingBefore != null && pendingBefore != 0 && !force，
+# 即 pendingOf() 返回 null 时【静默放行】。null 的来源有两个：资源行不存在、quota:stock key 缺失。
+# 后者（key 没了）会让 reset 绕过排空检查 —— 而 key 缺失恰恰是"账本最不可信"的时刻。
+# 建议改成 null 也拒绝，或至少 WARN。属 src/，按约定本轮不动。
