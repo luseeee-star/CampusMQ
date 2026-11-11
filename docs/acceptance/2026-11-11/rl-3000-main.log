@@ -1,0 +1,18 @@
+
+=== open loop · group 3: redis + mq async persist ===
+target   http://127.0.0.1:8080/api/claim/mq
+window   60s per step, OPEN loop (rate is the input)
+steps    3000 req/s
+pool     2048 threads, bounded queue, reject instead of blocking the pacer
+
+qps,act,thr,thrReal,finMs,p50,p95,p99,avg,ok,full,other,err,limited,rej,inflight,fail%,failAll%
+3000,2999,2846,2837,60191,8,974,5565,260,170793,0,0,0,0,9170,0,0.00,5.10
+
+note  act/thr/thrReal 是每秒速率；ok/full/other/err/rej 是本档总数 —— 两列量纲不同，别直接相除
+note  act = 节拍器实际发起速率，thr = 窗口内完成速率。thr 明显小于 act 就是在堆积，不是「压测器发不出去」
+note  thrReal = total / finMs（线程池排空耗时）。thr 与它差得远，说明有请求在窗口结束后才回来，这一档的 thr 是注入速率不是吞吐；finMs=-1 表示 60 秒内没排空，只能给下界
+note  rej = 客户端队列满被拒（压力真的灌满了）；inflight = 窗口结束仍在途
+note  limited = 服务端 429 限流（D6），既不算成功也不算失败。它与 rej 是两回事：limited 说明闸门在工作，rej 说明连闸门都没排上队
+note  fail% = err/total（只算已发出的）；failAll% = (err+rej)/(total+rej)（含客户端丢弃）。闭合环下 rej=0，两者应相等 —— 不等就是统计算错了
+note  首档 3000 → 末档 3000 req/s：完成速率 2846 → 2846 req/s；若末档 thr < act 或 fail% 跳升，可用性边界就在这两档之间
+
