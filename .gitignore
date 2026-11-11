@@ -48,3 +48,4 @@ logs/
 /in
 # 本地会话笔记，不属于项目源码；要入库时显式 git add -f
 .workbuddy/
+tmp/

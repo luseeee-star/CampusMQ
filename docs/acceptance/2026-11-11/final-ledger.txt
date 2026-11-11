@@ -1,0 +1,5 @@
+# 2026-11-11 终态账面（活动 24，reset 之前）
+# 2026-11-11 15:57:06
+{"code":0,"message":"ok","data":{"resourceId":24,"totalQuota":2000000,"dbRemain":1385039,"redisRemain":1385059,"drift":20,"records":649503,"issued":614961,"dbConsumed":614961,"redisConsumed":614941,"pending":-20,"oversold":-1385039,"overflow":false,"recordsOverQuota":false,"quotaInvariant":true,"invariantDelta":0,"issuedLeRecords":true,"idemKeys":649503,"idemMatch":true,"balanced":false},"success":true}
+# reconcile_diff（取证协议：reset 会 DELETE 本表，先 dump）
+(空=无 P1/P2 痕迹)

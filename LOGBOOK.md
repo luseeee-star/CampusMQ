@@ -4261,3 +4261,55 @@ SELECT fix_action, COUNT(*) FROM reconcile_diff WHERE resource_id = ? GROUP BY f
 3. **`RateLimitProperties` 的注释待改**：现在是「3000 是最后一个还舒服的档」，
    应改为「3000 是最后一个**入口还能自主决定**的档；持续压 60 秒后 P99 由消费侧决定」。
    代码注释属 `src/`，本轮不动，记在这里。
+
+### 六、收尾结算：两条自打脸的记录
+
+**① `drift` 是 +20，方向与昨晚的 −2 相反。**
+
+活动 24 排空与复位前的终态（`final-ledger.txt`）：
+
+```
+records 649,503 = idemKeys 649,503   （记录账闭合）
+issued  614,961                       （差额 34,542 = 取消/释放）
+dbRemain 1,385,039 / redisRemain 1,385,059 → drift = +20（Redis 偏大）
+pending −20、quotaInvariant true、invariantDelta 0
+```
+
+昨晚记的是「Redis 偏小 ≤2，fail-closed 一侧」，今天同一个字段是 **Redis 偏大 20**——
+也就是**少扣了 20 个名额**，方向反过来，属于 fail-open 一侧。
+量级 20 / 200 万 = 0.001%，不影响结论，但**「方向永远是 Redis 偏小」这句话不能再写了**。
+
+**② 取证协议在这条上失败了，得记下来。**
+
+按 11-10 定的协议，我在 reset **之前**执行：
+
+```sql
+SELECT fix_action, COUNT(*) FROM campusslot.reconcile_diff GROUP BY fix_action;
+```
+
+返回**空**。据此写了「P1/P2 都不存在，只剩 P3 或未定位」。
+
+**一分钟后 reset 的返回是 `deletedReconcileDiffs: 11`**——表里确实有 11 行。
+
+两种可能，都无法回溯（表已被删）：**要么那 11 行是我查询之后才产生的**（`ReconcileJob` 定时对账
+发现 `drift 20` 后写进去的，这最可能：对账任务是定时的，而 drift 正来自本轮），
+**要么我的查询本身没查到**（`docker exec` 的 `2>/dev/null` 会把错误一起吞掉，这是我用惯的写法，
+恰恰是最危险的那种"看起来成功"）。
+
+**协议要改两条**，下次必须这样写：
+
+1. `SELECT * FROM reconcile_diff WHERE resource_id = ?` 取全行（含 `detected_at`），
+   而不是只看 `GROUP BY` 的分布——分布为空会让人误判"没有"，全行至少能看到时间戳；
+2. **不许用 `2>/dev/null`**：查询失败和结果为空在输出上完全一样。
+
+这条比 `drift` 的方向更值得记：**一个会静默失败的取证步骤，比没有取证更糟**。
+
+### 七、清理
+
+- 活动 24（压测载体）已 `reset` 并删除：`deletedRecords 649,503`、`deletedNotifications 556,721`、
+  `deletedReconcileDiffs 11`，Redis 7 个 `quota:stock:*` 一并删除。
+- smoke 残留 18–23 共 6 行全部删除（20/23 此前已是 `CLOSED` 并各有一份报表，一并删）。
+- 终态快照：`redis-cli BGSAVE` → `rdb_last_bgsave_status: ok`、`aof_last_bgrewrite_status: ok`；
+  `mysqldump --single-transaction` → `tmp/campusslot-20261111.sql.gz`（**23 MB**）。
+- 保留：**r1**（1,000,000/1,000,000/PUBLISHED，`close_at 16:31`）、**r3**（CLOSED + 报表）、
+  id=2（80 配额，11-12 到期，早期实验遗留，不在本轮范围）。
