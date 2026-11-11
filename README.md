@@ -866,7 +866,7 @@ curl -X POST "http://127.0.0.1:8080/api/claim/dev/reset?resourceId=2"
 | `CLOSED` 的写入方 | 此前**全仓只有读方**（`ReconcileJob` 用它补报表），没有任何一处写它：`close_at` 到点后状态永远停 `PUBLISHED`、`quota_report` 永远不出现。新增 `ResourceCloseJob`：5s 扫 + 条件 `UPDATE`（`rows=1` 才算关成功）+ 「已关闭但无报表」兜底 | 同上；实测 `generated_at − close_at = 4s`，零手工触发 |
 | 入口 `studentId` 长度校验 | 代码 10-27 就在 `StudentIdRule`（`MAX_LENGTH=32`，5 处入口），补的是实测：61 字符 → `1001`、`quota:stock` 不动、`quota_record` 0 行、`pending=0` | 同上 |
 | 限流闸门重标定 | 6000 档开环实测 **P99 6,661ms**（干净起点、2048 线程、闸门关闭），判据落「拐点是真的」→ **闸门维持 3000**。同时测出 3000 档在 48 万行 / 60 秒稳态下 P99 **5,565ms**，而 D5 的 145ms 是 5 秒窗口——**NFR-1 从此是双条件结论** | `docs/acceptance/2026-11-11/rl-calibration.md` |
-| 到点自动关闭的线上验证 | r3（15:19）/ r1（16:31）到点后 `status=CLOSED` 且报表自动生成，**零手工触发** | 同目录 |
+| 到点自动关闭的线上验证 | r3（15:19:56 → CLOSED + 报表 `balanced=1`，gap **1s**）、r1（16:31:00 → CLOSED + 报表 `1,000,000/0/0/0/0/0/balance=1`，gap **3s**），**全程零手工触发** | `docs/acceptance/2026-11-11/auto-close-verify.txt` |
 
 ### 10.2 显式不做
 

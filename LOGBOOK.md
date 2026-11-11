@@ -4313,3 +4313,24 @@ SELECT fix_action, COUNT(*) FROM campusslot.reconcile_diff GROUP BY fix_action;
   `mysqldump --single-transaction` → `tmp/campusslot-20261111.sql.gz`（**23 MB**）。
 - 保留：**r1**（1,000,000/1,000,000/PUBLISHED，`close_at 16:31`）、**r3**（CLOSED + 报表）、
   id=2（80 配额，11-12 到期，早期实验遗留，不在本轮范围）。
+
+### 八、r1 到点自动关闭：第二个验证点（16:31）
+
+`r1.close_at = 2026-11-11 16:31:00`，同样**零手工触发**：
+
+| 判据 | 实测 |
+|---|---|
+| `status` | `CLOSED` |
+| 报表 | `total 1,000,000 / applied 0 / granted 0 / confirmed 0 / released 0 / locked 0 / remain 1,000,000 / balanced 1` |
+| `generated_at − close_at` | **3 秒**（16:31:03 − 16:31:00） |
+
+r1 从未被申领过（`applied 0`），所以这份报表验的是「空活动也能正确关账」这条路径：
+`remain = total`、`balanced = 1`，没有因为「一条记录都没有」而算出 `balanced = 0` 或漏报。
+
+**中途差点毁掉这个验证点，记下来**：14:11 起的后台常驻任务写的是 `Start-Sleep -Seconds 8400`，
+从启动时刻算正好落在 **16:31:14**——比 `close_at` 只晚 14 秒，而 `ResourceCloseJob` 的扫描周期是 5 秒。
+也就是说**服务会在报表写出来之前被 `finally` 停掉**，验证点会静默丢失，而且日志上看起来"任务正常结束"。
+15:59 发现后换成 `5400` 秒（到 17:29）并重启，r1 未受影响。
+
+教训：**凡是用「固定秒数」等某个绝对时刻，都要把那句话写成「等到 T 时刻」**——
+`Start-Sleep` 的起点是任务启动时刻，不是你以为的那个时刻。差 14 秒就废掉一个验证点。
