@@ -22,8 +22,13 @@
 #    ExpiredReleaseSweeper 的 TIMEOUT 释放撞上 DB 已满 → DB 不回补、Redis 照常 INCR。
 #    11 条与 deletedReconcileDiffs=11 数值相同，但两者来源不同（ReleaseService vs ReconcileService），
 #    是否同一批【无法判定】。
-#    ★ 这条是 drift 方向反转（+20，Redis 偏大）的【首个机制级证据】：
-#      不是"少扣 20"，是 DB_AT_TOTAL 单边回补 — 方向 fail-open，与 11-10 的"永远偏小"相反。
+#    ★ 这条证明的是一条【真实的 fail-open 路径】（DB_AT_TOTAL 单边回补，Redis 照 INCR），
+#      推翻了 11-10 写的"方向永远 Redis 偏小"。
+#    ✗ 但它【不能解释】上面 15:57:06 已测到的 drift=+20：
+#      ① WARN 在 15:57:23，比 stat 晚 17 秒——用后发生的事件解释先测到的数不成立；
+#      ② 这条路径的方向只会让 pending 更负（Redis 单边 INCR），而观测值是 +20（Redis 偏大）。
+#      它贡献的 11 个单位随后被 reset 的 SET 抹平，与 +20 是两个方向相反的量。
+#    → 结论：fail-open 路径已验证；**+20 本身的来源仍不可回溯**（见下方第 4 条）。
 #
 # 【不可回溯】
 # 4. pending 从 -20 归 0 的路径：reset 的返回值没完整落盘（pendingBeforeReset 字段未保存），
