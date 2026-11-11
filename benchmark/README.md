@@ -12,7 +12,7 @@
 | `fsync-ab.ps1` | D5 ✅ | 消费侧 323 条/秒的归因 A/B：只改 MySQL 两个刷盘开关，量消费速率与等锁线程数 |
 | `layered.ps1` | D5 ✅ | 三层防线对照（§8.2）+ 失败率（NFR-2）+ Redis commandstats |
 | `open-loop.ps1` | D5 ✅ | 开环（固定 QPS）测可用性边界（NFR-6）：8000 QPS 是"收得下"还是"来不及" |
-| `q7-steady.ps1` | 2026-11-10 ✅ | 开环两档线程（768/2048）裁决 `3,845` 到底是系统的墙还是压测器的墙 |
+| `q7-steady.ps1` | 2026-11-10 ✅ | 开环两档线程（768/2048）裁决 `3,845` 到底是系统的墙还是压测器的墙（**裁决结果：不是系统的墙**，见 `docs/acceptance/2026-11-10/q7-steady-openloop.md`） |
 | `d7r-closedloop.ps1` | 2026-11-10 ✅ | 闭环 2×2（冷/热 × consumer 开/停）**只翻 consumer 一个开关**，归因 9,256 与 10,650 那 13%；`-Arms B,A -Tag 2 -Append` 用来跑反序第二轮 |
 | `night-smoke.ps1` | 2026-11-10 ✅ | 一晚改完后的三项判据一次跑完（一次 app 生命周期、12 条）：超长学号 1001 且 stock 不动、single-flight 每个失效窗口只回源 1 次、`close_at` 到点自动 CLOSED + 出报表。**只建临时活动，不碰 r1/r3** |
 
