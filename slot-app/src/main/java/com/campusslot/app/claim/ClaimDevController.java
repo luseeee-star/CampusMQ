@@ -139,10 +139,20 @@ public class ClaimDevController {
         // pending 变成一个很大的负数（2026-10-28 实测 -27605）。
         // 这种状态不会自愈，也不会被任何判据自动纠正，只能靠下一轮 reset 覆盖。
         // 所以默认拒绝，必须显式 force 才允许"我知道账是脏的，就是要重来"。
-        if (pendingBefore != null && pendingBefore != 0 && !force) {
-            return R.fail(ErrorCode.SYSTEM_BUSY,
-                    "复位前仍有 " + pendingBefore + " 条消息未落库（pending!=0），"
-                            + "先调 /api/claim/dev/drain；确认要丢掉这部分账目请传 force=true");
+        // 读不到就拒绝：pendingOf 返回 null 说明 Redis / DB 有一侧读不出来，
+        // 而那恰恰是账本最不可信的时刻。原来的写法 `pendingBefore != null && ...`
+        // 会把 null 当成"已排空"静默放行（2026-11-11 发现）。
+        if (!force) {
+            if (pendingBefore == null) {
+                return R.fail(ErrorCode.SYSTEM_BUSY,
+                        "复位前读不到 pending（Redis 或 DB 单侧不可用），账本状态未知；"
+                                + "确认要丢掉这部分账目请传 force=true");
+            }
+            if (pendingBefore != 0) {
+                return R.fail(ErrorCode.SYSTEM_BUSY,
+                        "复位前仍有 " + pendingBefore + " 条消息未落库（pending!=0），"
+                                + "先调 /api/claim/dev/drain；确认要丢掉这部分账目请传 force=true");
+            }
         }
 
         int total = quota > 0 ? quota : existing;

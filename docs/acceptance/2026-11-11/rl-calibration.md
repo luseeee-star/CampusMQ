@@ -191,6 +191,13 @@ consumer 的 20 个线程全部排在 `UPDATE quota_resource SET remain = remain
    （`dbRemain == totalQuota` 时 DB 已无法再加），方向是 **fail-open**。
    reset 的 `UPDATE remain=total` 与 `SET quota:stock` 之间存在窗口，
    15:57:23 那 0.43 秒里 `ExpiredReleaseSweeper` 的 11 条 TIMEOUT 释放正好落进去。
+
+   **但这 11 条解释不了 `+20` 本身。** 账面 `drift=20` 是 **15:57:06** 取的，
+   WARN 是 **15:57:23**——晚 17 秒；而且这条路径只会让 `pending` 更负
+   （Redis 单边 `INCR`），不会把它抬回 0，它们贡献的 11 个单位随后被 reset 的 `SET` 抹平。
+   所以正确的记法是：**`DB_AT_TOTAL` 单边回补 = 已验证的 fail-open 产生机制；
+   `+20` 的来源仍不可回溯**（用后发生的事件解释先测到的数，正是这个项目反复纠的错）。
+
    完整取证见 `final-ledger.txt` 的「取证缺口结论」。
 
 ## 八、原始文件

@@ -21,7 +21,7 @@
 | `rl-3000-main.log` | 3000 档 60 秒（表 48.4 万行），与 D5 的 145ms 同档对照 | RL-3000 |
 | `rl-6000-drain.log` / `rl-3000-drain.log` | 两轮排空（`costMs` 与 `pending` 归零时刻） | 排空速率 |
 | `auto-close-verify.txt` | r3（15:19:56 → gap **1s**）与 r1（16:31:00 → gap **3s**）两个到点验证，零手工触发 | AUTO-CLOSE |
-| `final-ledger.txt` | 排空终态账面 `records=idemKeys=649,503`、`drift **+20**`（Redis 偏大）；**末尾附「取证缺口结论」**：dump 前 diff 为空（可回溯）、对账只读不修（代码）、11 条 `DB_AT_TOTAL` 落在 reset 窗口内（日志）、pending 归零不可回溯 + 三条协议修正 | 账面闭合 |
+| `final-ledger.txt` | 排空终态账面 `records=idemKeys=649,503`、`drift **+20**`（Redis 偏大）；**末尾附「取证缺口结论」**：dump 前 diff 为空（可回溯）、对账只读不修（代码）、11 条 `DB_AT_TOTAL` 落在 reset 窗口内（日志，**但不能解释 15:57:06 已测到的 `+20`**——WARN 晚 17 秒且方向相反）、pending 归零不可回溯 + 三条协议修正 | 账面闭合 |
 
 ### 四个引用时必须注意的口径
 
